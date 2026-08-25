@@ -35,6 +35,23 @@ Run from the repository root:
 ./verify
 ```
 
-The generated `artifacts/` directory contains both raw captures, normalized request JSON, harness output, and a Markdown report.
+The generated `artifacts/verify/` directory contains both raw captures, normalized request JSON, harness output, and a Markdown report.
+
+## REPL
+
+The repository also includes a first-turn prompt loop backed by a real OpenAI-compatible model:
+
+```sh
+export OPENAI_API_KEY=your-key
+./repl
+```
+
+Every input starts fresh. OpenCode makes the upstream model call first, then the relay gives Pi the exact same response bytes. This controls for model stochasticity. `./repl --independent` makes two upstream calls instead.
+
+After a run, use `:system` to print the exact system messages from both captured requests or `:requests` to print the complete provider payloads. Every REPL turn is retained under `artifacts/runs/`.
+
+The model requests use temperature zero. Hosted inference can still vary at temperature zero, which is why replay is the default comparison mode.
+
+This first REPL version is intended for prompts that finish without tool calls. The extension reproduces OpenCode's tool names, descriptions, and schemas, but its implementations are deliberately disabled. It does not yet test subsequent tool-result messages or persistent multi-turn sessions.
 
 OpenCode prompt and tool text captured during the run is covered by OpenCode's MIT license. See [`THIRD_PARTY_NOTICE.md`](THIRD_PARTY_NOTICE.md).

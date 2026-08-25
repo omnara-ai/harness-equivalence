@@ -16,6 +16,7 @@ jobs:
           node-version-file: .node-version
           cache: npm
       - run: npm ci
+      - run: npm test
       - run: npm run verify
       - if: always()
         uses: actions/upload-artifact@v7

@@ -8,9 +8,17 @@ import { startCaptureServer } from "./capture-server.mjs";
 
 const experimentDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(experimentDirectory, "../..");
-const artifactsDirectory = path.join(experimentDirectory, "artifacts");
+const runId = process.env.HARNESS_RUN_ID;
+if (runId && !/^[a-zA-Z0-9_-]+$/.test(runId)) {
+  throw new Error("HARNESS_RUN_ID may contain only letters, numbers, underscores, and hyphens");
+}
+const artifactsDirectory = runId
+  ? path.join(experimentDirectory, "artifacts", "runs", runId)
+  : path.join(experimentDirectory, "artifacts", "verify");
 const capturesDirectory = path.join(artifactsDirectory, "captures");
-const stateDirectory = path.join(experimentDirectory, ".state");
+const stateDirectory = runId
+  ? path.join(experimentDirectory, ".state", "runs", runId)
+  : path.join(experimentDirectory, ".state", "verify");
 const fixtureDirectory = path.join(stateDirectory, "fixture");
 const openCodeBinary = path.join(repositoryRoot, "node_modules", ".bin", "opencode");
 const piCli = path.join(
@@ -23,8 +31,12 @@ const piCli = path.join(
   "cli.js",
 );
 const extension = path.join(experimentDirectory, "pi-opencode-compat.ts");
-const prompt = "Reply with exactly OK. Do not call a tool.";
-const model = "gpt-4o-mini";
+const prompt = process.env.HARNESS_PROMPT ?? "Reply with exactly OK. Do not call a tool.";
+const model = process.env.HARNESS_MODEL ?? "gpt-4o-mini";
+const providerMode = process.env.HARNESS_PROVIDER_MODE ?? "fixture";
+const temperature = Number(process.env.HARNESS_TEMPERATURE ?? "0");
+const quiet = process.env.HARNESS_QUIET === "1";
+const allowDifferences = process.env.HARNESS_ALLOW_DIFFERENCES === "1";
 
 const versions = {
   openCode: {
@@ -57,12 +69,13 @@ function run(command, args, options = {}) {
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: options.env,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => (stdout += chunk));
     child.stderr.on("data", (chunk) => (stderr += chunk));
+    if (options.input !== undefined) child.stdin.end(options.input);
     child.once("error", reject);
     child.once("exit", (code, signal) => {
       if (code === 0) {
@@ -82,6 +95,13 @@ function run(command, args, options = {}) {
       );
     });
   });
+}
+
+function harnessEnvironment(overrides) {
+  const environment = { ...process.env, ...overrides };
+  delete environment.HARNESS_API_KEY;
+  delete environment.OPENAI_API_KEY;
+  return environment;
 }
 
 function stable(value) {
@@ -165,6 +185,12 @@ function assertSupportedNode() {
   if (major < 22 || (major === 22 && minor < 19)) {
     throw new Error(`Node 22.19 or newer is required. Current version: ${process.versions.node}`);
   }
+  if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2) {
+    throw new Error(`HARNESS_TEMPERATURE must be between 0 and 2. Received: ${process.env.HARNESS_TEMPERATURE}`);
+  }
+  if (!["fixture", "replay", "independent"].includes(providerMode)) {
+    throw new Error(`HARNESS_PROVIDER_MODE must be fixture, replay, or independent. Received: ${providerMode}`);
+  }
 }
 
 async function writeOpenCodeConfig(baseUrl) {
@@ -173,6 +199,11 @@ async function writeOpenCodeConfig(baseUrl) {
     model: `capture/${model}`,
     enabled_providers: ["capture"],
     share: "disabled",
+    agent: {
+      build: {
+        temperature,
+      },
+    },
     provider: {
       capture: {
         name: "Local request capture",
@@ -211,7 +242,6 @@ async function captureOpenCode(baseUrl) {
     openCodeBinary,
     [
       "run",
-      ...prompt.split(" "),
       "--model",
       `capture/${model}`,
       "--title",
@@ -221,8 +251,9 @@ async function captureOpenCode(baseUrl) {
     ],
     {
       cwd: fixtureDirectory,
-      env: {
-        ...process.env,
+      input: prompt,
+      env: harnessEnvironment({
+        PWD: fixtureDirectory,
         OPENCODE_CONFIG: config,
         OPENCODE_DISABLE_PROJECT_CONFIG: "1",
         OPENCODE_DISABLE_DEFAULT_PLUGINS: "1",
@@ -234,7 +265,7 @@ async function captureOpenCode(baseUrl) {
         XDG_CONFIG_HOME: path.join(xdgDirectory, "config"),
         XDG_DATA_HOME: path.join(xdgDirectory, "data"),
         XDG_STATE_HOME: path.join(xdgDirectory, "state"),
-      },
+      }),
     },
   );
   await writeFile(path.join(artifactsDirectory, "opencode.stdout.jsonl"), result.stdout);
@@ -311,11 +342,11 @@ async function capturePi(baseUrl, contractPath, openCodeBody) {
     ],
     {
       cwd: fixtureDirectory,
-      env: {
-        ...process.env,
+      env: harnessEnvironment({
+        PWD: fixtureDirectory,
         PI_CODING_AGENT_DIR: piAgentDirectory,
         OPENCODE_CONTRACT_PATH: contractPath,
-      },
+      }),
     },
   );
   await writeFile(path.join(artifactsDirectory, "pi.stdout.txt"), result.stdout);
@@ -387,11 +418,17 @@ function comparisonRows(openCodeBody, piBody, openCodeOutput, piOutput) {
     },
     {
       field: "Observed output",
-      openCode: JSON.stringify(openCodeOutput),
-      pi: JSON.stringify(piOutput),
+      openCode: outputSummary(openCodeOutput),
+      pi: outputSummary(piOutput),
       equal: openCodeOutput === piOutput,
     },
   ];
+}
+
+function outputSummary(output) {
+  const oneLine = output.replace(/\s+/g, " ").trim();
+  if (oneLine.length <= 36) return JSON.stringify(oneLine);
+  return `${oneLine.length} chars · ${shortHash(output)}`;
 }
 
 function printTable(rows) {
@@ -430,7 +467,9 @@ async function compare(openCodeResult, piResult) {
   const result = {
     versions,
     prompt,
-    deterministicProviderResponse: "OK",
+    providerMode,
+    temperature,
+    deterministicProviderResponse: providerMode === "fixture" ? "OK" : undefined,
     exactModelVisibleRequest,
     completeParsedRequest,
     rawBytesEqual,
@@ -440,6 +479,11 @@ async function compare(openCodeResult, piResult) {
     piRawBodySha256: sha256(piCapture.rawBody),
     openCodeCanonicalBodySha256: sha256(JSON.stringify(canonicalOpenCodeBody)),
     piCanonicalBodySha256: sha256(JSON.stringify(canonicalPiBody)),
+    systemPromptsEqual: firstSystemPrompt(openCodeBody) === firstSystemPrompt(piBody),
+    openCodeSystemPromptSha256: sha256(firstSystemPrompt(openCodeBody)),
+    piSystemPromptSha256: sha256(firstSystemPrompt(piBody)),
+    openCodeOutput,
+    piOutput,
     firstDifference: difference,
   };
 
@@ -462,7 +506,7 @@ async function compare(openCodeResult, piResult) {
 
 User input: \`${prompt}\`
 
-Provider response: deterministic local fixture returning \`OK\`
+Provider mode: \`${providerMode}\`${providerMode === "fixture" ? ", returning deterministic `OK`" : ` at temperature \`${temperature}\``}
 
 | Field | OpenCode | Pi | Equal |
 |---|---|---|---:|
@@ -482,21 +526,31 @@ The complete parsed requests are available in [opencode.request.json](opencode.r
 diff -u opencode.request.canonical.json pi.request.canonical.json
 \`\`\`
 
-The fixed response removes model stochasticity. Equal observed outputs show that both harnesses accepted and rendered the same provider response. They do not test real-model output quality.
+${providerMode === "fixture" ? "The fixed response removes model stochasticity. Equal observed outputs show that both harnesses accepted and rendered the same provider response. They do not test real-model output quality." : providerMode === "replay" ? "The relay made one upstream model call for OpenCode and replayed its exact response bytes to Pi. This removes model stochasticity between the harnesses." : "The relay made one upstream model call per harness. Temperature zero reduces sampling variance but does not guarantee identical provider output."}
 `;
   await writeFile(path.join(artifactsDirectory, "REPORT.md"), report);
 
-  console.log("\nPi as OpenCode, first provider request\n");
-  console.log(`User input: ${JSON.stringify(prompt)}`);
-  console.log('Provider:   local deterministic fixture returning "OK"\n');
-  printTable(rows);
-  console.log(`\nRaw HTTP bodies equal: ${rawBytesEqual ? "yes" : "no, JSON object-key order differs"}`);
-  console.log(`Artifacts: ${path.relative(repositoryRoot, artifactsDirectory)}/`);
-  console.log(
-    `\nResult: ${exactModelVisibleRequest && completeParsedRequest && outputEqual ? "equivalent first request" : "not equivalent"}`,
-  );
+  if (!quiet) {
+    console.log("\nPi as OpenCode, first provider request\n");
+    console.log(`User input: ${JSON.stringify(prompt)}`);
+    console.log(
+      `Provider:   ${providerMode === "fixture" ? 'local deterministic fixture returning "OK"' : `${providerMode}, temperature ${temperature}`}\n`,
+    );
+    printTable(rows);
+    console.log(`\nRaw HTTP bodies equal: ${rawBytesEqual ? "yes" : "no, JSON object-key order differs"}`);
+    console.log(`Artifacts: ${path.relative(repositoryRoot, artifactsDirectory)}/`);
+    console.log(
+      `\nResult: ${exactModelVisibleRequest && completeParsedRequest ? "equivalent first request" : "not equivalent"}`,
+    );
+  }
 
-  if (!exactModelVisibleRequest || !completeParsedRequest || !outputEqual) process.exitCode = 1;
+  const outputMustMatch = providerMode === "fixture";
+  if (
+    !allowDifferences &&
+    (!exactModelVisibleRequest || !completeParsedRequest || (outputMustMatch && !outputEqual))
+  ) {
+    process.exitCode = 1;
+  }
 }
 
 async function main() {
@@ -508,7 +562,16 @@ async function main() {
   await mkdir(fixtureDirectory, { recursive: true });
   await run("git", ["init", "--quiet"], { cwd: fixtureDirectory, env: process.env });
 
-  const server = await startCaptureServer(capturesDirectory);
+  const server = await startCaptureServer(capturesDirectory, {
+    mode: providerMode,
+    upstream:
+      providerMode === "fixture"
+        ? undefined
+        : {
+            baseUrl: process.env.HARNESS_API_BASE_URL ?? "https://api.openai.com/v1",
+            apiKey: process.env.HARNESS_API_KEY ?? process.env.OPENAI_API_KEY,
+          },
+  });
   let openCodeResult;
   let piResult;
   try {

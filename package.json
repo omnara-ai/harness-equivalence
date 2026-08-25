@@ -5,6 +5,8 @@
   "description": "Reproducible experiments comparing the provider requests produced by agent harnesses",
   "type": "module",
   "scripts": {
+    "repl": "node experiments/pi-opencode-first-request/repl.mjs",
+    "test": "node test/live-replay.mjs",
     "verify": "node experiments/pi-opencode-first-request/run.mjs"
   },
   "engines": {

@@ -47,9 +47,63 @@ function sendFixedCompletion(response, body) {
   response.end("data: [DONE]\n\n");
 }
 
-export async function startCaptureServer(outputDirectory) {
+function responseHeaders(headers) {
+  const result = {};
+  for (const name of ["content-type", "cache-control"]) {
+    const value = headers.get(name);
+    if (value) result[name] = value;
+  }
+  return result;
+}
+
+async function requestUpstream(upstream, rawBody) {
+  const headers = {
+    accept: "text/event-stream",
+    "content-type": "application/json",
+    ...(upstream.apiKey ? { authorization: `Bearer ${upstream.apiKey}` } : {}),
+    ...(upstream.headers ?? {}),
+  };
+  const response = await fetch(`${upstream.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+    method: "POST",
+    headers,
+    body: rawBody,
+    signal: AbortSignal.timeout(upstream.timeoutMs ?? 120_000),
+  });
+  return {
+    status: response.status,
+    statusText: response.statusText,
+    headers: responseHeaders(response.headers),
+    rawBody: Buffer.from(await response.arrayBuffer()),
+  };
+}
+
+async function recordResponse(outputDirectory, harness, suffix, upstreamResponse, replayed) {
+  const metadata = {
+    status: upstreamResponse.status,
+    statusText: upstreamResponse.statusText,
+    headers: upstreamResponse.headers,
+    replayed,
+  };
+  await writeFile(
+    path.join(outputDirectory, `${harness}${suffix}.response.json`),
+    `${JSON.stringify(metadata, null, 2)}\n`,
+  );
+  await writeFile(path.join(outputDirectory, `${harness}${suffix}.response.raw`), upstreamResponse.rawBody);
+}
+
+function sendBufferedResponse(response, upstreamResponse) {
+  response.writeHead(upstreamResponse.status, upstreamResponse.headers);
+  response.end(upstreamResponse.rawBody);
+}
+
+export async function startCaptureServer(outputDirectory, options = {}) {
   await mkdir(outputDirectory, { recursive: true });
+  const mode = options.mode ?? "fixture";
+  if (mode !== "fixture" && !options.upstream?.baseUrl) {
+    throw new Error(`Capture mode ${mode} requires an upstream base URL`);
+  }
   const requestCounts = new Map();
+  const openCodeResponses = new Map();
 
   const server = createServer(async (request, response) => {
     try {
@@ -87,7 +141,26 @@ export async function startCaptureServer(outputDirectory) {
         path.join(outputDirectory, `${harness}${suffix}.capture.json`),
         `${JSON.stringify(capture, null, 2)}\n`,
       );
-      sendFixedCompletion(response, body);
+
+      if (mode === "fixture") {
+        sendFixedCompletion(response, body);
+        return;
+      }
+
+      if (mode === "replay" && harness === "pi") {
+        const recorded = openCodeResponses.get(ordinal);
+        if (!recorded) {
+          throw new Error(`Pi request ${ordinal} has no matching OpenCode response to replay`);
+        }
+        await recordResponse(outputDirectory, harness, suffix, recorded, true);
+        sendBufferedResponse(response, recorded);
+        return;
+      }
+
+      const upstreamResponse = await requestUpstream(options.upstream, rawBody);
+      if (mode === "replay" && harness === "opencode") openCodeResponses.set(ordinal, upstreamResponse);
+      await recordResponse(outputDirectory, harness, suffix, upstreamResponse, false);
+      sendBufferedResponse(response, upstreamResponse);
     } catch (error) {
       response.writeHead(500, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: { message: String(error) } }));
