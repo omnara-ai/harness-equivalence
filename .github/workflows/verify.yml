@@ -1,0 +1,25 @@
+name: Verify
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  harness-equivalence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci
+      - run: npm run verify
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pi-opencode-first-request
+          path: experiments/pi-opencode-first-request/artifacts/
+          if-no-files-found: ignore

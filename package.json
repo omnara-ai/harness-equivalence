@@ -1,0 +1,17 @@
+{
+  "name": "harness-equivalence",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Reproducible experiments comparing the provider requests produced by agent harnesses",
+  "type": "module",
+  "scripts": {
+    "verify": "node experiments/pi-opencode-first-request/run.mjs"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.3",
+    "opencode-ai": "1.18.22"
+  }
+}
