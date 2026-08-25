@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,6 +20,8 @@ const stateDirectory = runId
   ? path.join(experimentDirectory, ".state", "runs", runId)
   : path.join(experimentDirectory, ".state", "verify");
 const fixtureDirectory = path.join(stateDirectory, "fixture");
+const fixtureSnapshotDirectory = path.join(stateDirectory, "fixture-snapshot");
+const openCodeXdgDirectory = path.join(stateDirectory, "opencode-xdg");
 const openCodeBinary = path.join(repositoryRoot, "node_modules", ".bin", "opencode");
 const piCli = path.join(
   repositoryRoot,
@@ -35,6 +37,10 @@ const prompt = process.env.HARNESS_PROMPT ?? "Reply with exactly OK. Do not call
 const model = process.env.HARNESS_MODEL ?? "gpt-4o-mini";
 const providerMode = process.env.HARNESS_PROVIDER_MODE ?? "fixture";
 const temperature = Number(process.env.HARNESS_TEMPERATURE ?? "0");
+const shell =
+  process.env.HARNESS_SHELL ??
+  process.env.SHELL ??
+  (process.platform === "win32" ? "cmd.exe" : "/bin/sh");
 const quiet = process.env.HARNESS_QUIET === "1";
 const allowDifferences = process.env.HARNESS_ALLOW_DIFFERENCES === "1";
 
@@ -197,8 +203,12 @@ async function writeOpenCodeConfig(baseUrl) {
   const config = {
     $schema: "https://opencode.ai/config.json",
     model: `capture/${model}`,
+    shell,
     enabled_providers: ["capture"],
     share: "disabled",
+    skills: {
+      paths: [path.join(fixtureDirectory, "skills")],
+    },
     agent: {
       build: {
         temperature,
@@ -236,8 +246,7 @@ async function writeOpenCodeConfig(baseUrl) {
 
 async function captureOpenCode(baseUrl) {
   const config = await writeOpenCodeConfig(baseUrl);
-  const xdgDirectory = path.join(stateDirectory, "opencode-xdg");
-  await mkdir(xdgDirectory, { recursive: true });
+  await mkdir(openCodeXdgDirectory, { recursive: true });
   const result = await run(
     openCodeBinary,
     [
@@ -261,10 +270,10 @@ async function captureOpenCode(baseUrl) {
         OPENCODE_DISABLE_CLAUDE_CODE: "1",
         OPENCODE_DISABLE_LSP_DOWNLOAD: "1",
         OPENCODE_CLIENT: "cli",
-        XDG_CACHE_HOME: path.join(xdgDirectory, "cache"),
-        XDG_CONFIG_HOME: path.join(xdgDirectory, "config"),
-        XDG_DATA_HOME: path.join(xdgDirectory, "data"),
-        XDG_STATE_HOME: path.join(xdgDirectory, "state"),
+        XDG_CACHE_HOME: path.join(openCodeXdgDirectory, "cache"),
+        XDG_CONFIG_HOME: path.join(openCodeXdgDirectory, "config"),
+        XDG_DATA_HOME: path.join(openCodeXdgDirectory, "data"),
+        XDG_STATE_HOME: path.join(openCodeXdgDirectory, "state"),
       }),
     },
   );
@@ -318,6 +327,8 @@ async function writePiConfig(baseUrl, openCodeBody) {
 
 async function capturePi(baseUrl, contractPath, openCodeBody) {
   const piAgentDirectory = await writePiConfig(baseUrl, openCodeBody);
+  const taskSessionDirectory = path.join(stateDirectory, "pi-task-sessions");
+  await mkdir(taskSessionDirectory, { recursive: true });
   const result = await run(
     process.execPath,
     [
@@ -346,6 +357,17 @@ async function capturePi(baseUrl, contractPath, openCodeBody) {
         PWD: fixtureDirectory,
         PI_CODING_AGENT_DIR: piAgentDirectory,
         OPENCODE_CONTRACT_PATH: contractPath,
+        OPENCODE_COMPAT_PROVIDER: "capture",
+        OPENCODE_COMPAT_MODEL: openCodeBody.model,
+        OPENCODE_COMPAT_SHELL: shell,
+        OPENCODE_PI_CLI: piCli,
+        OPENCODE_PI_EXTENSION: extension,
+        OPENCODE_SUBAGENT_TYPE: "",
+        OPENCODE_TASK_DEPTH: "0",
+        OPENCODE_RG_PATH: path.join(openCodeXdgDirectory, "cache", "opencode", "bin", "rg"),
+        OPENCODE_SKILL_PATHS: path.join(fixtureDirectory, "skills"),
+        OPENCODE_TRUNCATION_DIR: path.join(openCodeXdgDirectory, "data", "opencode", "tool-output"),
+        OPENCODE_TASK_SESSION_DIR: taskSessionDirectory,
       }),
     },
   );
@@ -354,8 +376,26 @@ async function capturePi(baseUrl, contractPath, openCodeBody) {
   return result;
 }
 
-async function readCapture(harness) {
-  return JSON.parse(await readFile(path.join(capturesDirectory, `${harness}.capture.json`), "utf8"));
+async function readCaptures(harness) {
+  const matcher = new RegExp(`^${harness}(?:\\.(\\d+))?\\.capture\\.json$`);
+  const files = (await readdir(capturesDirectory))
+    .map((filename) => ({ filename, match: filename.match(matcher) }))
+    .filter((entry) => entry.match)
+    .map((entry) => ({ filename: entry.filename, ordinal: entry.match[1] ? Number(entry.match[1]) : 1 }))
+    .sort((left, right) => left.ordinal - right.ordinal);
+  return Promise.all(
+    files.map(async (entry) => ({
+      ordinal: entry.ordinal,
+      ...(JSON.parse(await readFile(path.join(capturesDirectory, entry.filename), "utf8"))),
+    })),
+  );
+}
+
+async function readCapture(harness, ordinal = 1) {
+  const captures = await readCaptures(harness);
+  const capture = captures.find((entry) => entry.ordinal === ordinal);
+  if (!capture) throw new Error(`Missing ${harness} provider capture ${ordinal}`);
+  return capture;
 }
 
 async function writeContract(openCodeBody) {
@@ -444,24 +484,75 @@ function printTable(rows) {
 }
 
 async function compare(openCodeResult, piResult) {
-  const openCodeCapture = await readCapture("opencode");
-  const piCapture = await readCapture("pi");
-  const openCodeBody = openCodeCapture.body;
-  const piBody = piCapture.body;
-  const openCodeVisible = modelVisible(openCodeBody);
-  const piVisible = modelVisible(piBody);
-  const canonicalOpenCodeBody = stable(openCodeBody);
-  const canonicalPiBody = stable(piBody);
+  const openCodeCaptures = await readCaptures("opencode");
+  const piCaptures = await readCaptures("pi");
+  const openCodeByOrdinal = new Map(openCodeCaptures.map((capture) => [capture.ordinal, capture]));
+  const piByOrdinal = new Map(piCaptures.map((capture) => [capture.ordinal, capture]));
+  const ordinals = [...new Set([...openCodeByOrdinal.keys(), ...piByOrdinal.keys()])].sort((a, b) => a - b);
   const openCodeOutput = extractOpenCodeOutput(openCodeResult.stdout);
   const piOutput = extractPiOutput(piResult.stdout);
+  const requests = ordinals.map((ordinal) => {
+    const openCodeCapture = openCodeByOrdinal.get(ordinal);
+    const piCapture = piByOrdinal.get(ordinal);
+    if (!openCodeCapture || !piCapture) {
+      return {
+        ordinal,
+        presentInOpenCode: Boolean(openCodeCapture),
+        presentInPi: Boolean(piCapture),
+        exactModelVisibleRequest: false,
+        completeParsedRequest: false,
+        rawBytesEqual: false,
+        rawDifferenceOnlyKeyOrder: false,
+        firstDifference: {
+          pointer: `$requests[${ordinal}]`,
+          openCode: openCodeCapture ? "present" : "missing",
+          pi: piCapture ? "present" : "missing",
+        },
+      };
+    }
+    const openCodeBody = openCodeCapture.body;
+    const piBody = piCapture.body;
+    const openCodeVisible = modelVisible(openCodeBody);
+    const piVisible = modelVisible(piBody);
+    const canonicalOpenCodeBody = stable(openCodeBody);
+    const canonicalPiBody = stable(piBody);
+    const completeParsedRequest = isDeepStrictEqual(canonicalOpenCodeBody, canonicalPiBody);
+    const rawBytesEqual = openCodeCapture.rawBody === piCapture.rawBody;
+    const compactJson =
+      openCodeCapture.rawBody === JSON.stringify(openCodeBody) && piCapture.rawBody === JSON.stringify(piBody);
+    return {
+      ordinal,
+      presentInOpenCode: true,
+      presentInPi: true,
+      exactModelVisibleRequest: isDeepStrictEqual(openCodeVisible, piVisible),
+      completeParsedRequest,
+      rawBytesEqual,
+      rawDifferenceOnlyKeyOrder: !rawBytesEqual && compactJson && completeParsedRequest,
+      openCodeRawBodySha256: sha256(openCodeCapture.rawBody),
+      piRawBodySha256: sha256(piCapture.rawBody),
+      openCodeCanonicalBodySha256: sha256(JSON.stringify(canonicalOpenCodeBody)),
+      piCanonicalBodySha256: sha256(JSON.stringify(canonicalPiBody)),
+      firstDifference: firstDifference(openCodeVisible, piVisible),
+    };
+  });
+  const firstOpenCodeCapture = openCodeByOrdinal.get(1);
+  const firstPiCapture = piByOrdinal.get(1);
+  if (!firstOpenCodeCapture || !firstPiCapture) throw new Error("Both harnesses must produce a first provider request");
+  const openCodeBody = firstOpenCodeCapture.body;
+  const piBody = firstPiCapture.body;
+  const canonicalOpenCodeBody = stable(openCodeBody);
+  const canonicalPiBody = stable(piBody);
   const rows = comparisonRows(openCodeBody, piBody, openCodeOutput, piOutput);
-  const exactModelVisibleRequest = isDeepStrictEqual(openCodeVisible, piVisible);
-  const completeParsedRequest = isDeepStrictEqual(canonicalOpenCodeBody, canonicalPiBody);
-  const rawBytesEqual = openCodeCapture.rawBody === piCapture.rawBody;
-  const compactJson =
-    openCodeCapture.rawBody === JSON.stringify(openCodeBody) && piCapture.rawBody === JSON.stringify(piBody);
-  const rawDifferenceOnlyKeyOrder = !rawBytesEqual && compactJson && completeParsedRequest;
-  const difference = firstDifference(openCodeVisible, piVisible);
+  const exactModelVisibleRequest = requests.every((request) => request.exactModelVisibleRequest);
+  const completeParsedRequest = requests.every((request) => request.completeParsedRequest);
+  const rawBytesEqual = requests.every((request) => request.rawBytesEqual);
+  const rawDifferenceOnlyKeyOrder = requests.every(
+    (request) => request.rawBytesEqual || request.rawDifferenceOnlyKeyOrder,
+  );
+  const differingRequest = requests.find((request) => request.firstDifference);
+  const difference = differingRequest?.firstDifference
+    ? { ...differingRequest.firstDifference, request: differingRequest.ordinal }
+    : undefined;
   const outputEqual = openCodeOutput === piOutput;
 
   const result = {
@@ -470,13 +561,15 @@ async function compare(openCodeResult, piResult) {
     providerMode,
     temperature,
     deterministicProviderResponse: providerMode === "fixture" ? "OK" : undefined,
+    requestCount: { openCode: openCodeCaptures.length, pi: piCaptures.length },
+    requests,
     exactModelVisibleRequest,
     completeParsedRequest,
     rawBytesEqual,
     rawDifferenceOnlyKeyOrder,
     outputEqual,
-    openCodeRawBodySha256: sha256(openCodeCapture.rawBody),
-    piRawBodySha256: sha256(piCapture.rawBody),
+    openCodeRawBodySha256: sha256(firstOpenCodeCapture.rawBody),
+    piRawBodySha256: sha256(firstPiCapture.rawBody),
     openCodeCanonicalBodySha256: sha256(JSON.stringify(canonicalOpenCodeBody)),
     piCanonicalBodySha256: sha256(JSON.stringify(canonicalPiBody)),
     systemPromptsEqual: firstSystemPrompt(openCodeBody) === firstSystemPrompt(piBody),
@@ -487,22 +580,40 @@ async function compare(openCodeResult, piResult) {
     firstDifference: difference,
   };
 
-  await writeFile(path.join(artifactsDirectory, "opencode.request.json"), `${JSON.stringify(openCodeBody, null, 2)}\n`);
-  await writeFile(path.join(artifactsDirectory, "pi.request.json"), `${JSON.stringify(piBody, null, 2)}\n`);
-  await writeFile(
-    path.join(artifactsDirectory, "opencode.request.canonical.json"),
-    `${JSON.stringify(canonicalOpenCodeBody, null, 2)}\n`,
-  );
-  await writeFile(
-    path.join(artifactsDirectory, "pi.request.canonical.json"),
-    `${JSON.stringify(canonicalPiBody, null, 2)}\n`,
-  );
+  for (const capture of openCodeCaptures) {
+    const suffix = capture.ordinal === 1 ? "" : `.${capture.ordinal}`;
+    await writeFile(
+      path.join(artifactsDirectory, `opencode${suffix}.request.json`),
+      `${JSON.stringify(capture.body, null, 2)}\n`,
+    );
+    await writeFile(
+      path.join(artifactsDirectory, `opencode${suffix}.request.canonical.json`),
+      `${JSON.stringify(stable(capture.body), null, 2)}\n`,
+    );
+  }
+  for (const capture of piCaptures) {
+    const suffix = capture.ordinal === 1 ? "" : `.${capture.ordinal}`;
+    await writeFile(
+      path.join(artifactsDirectory, `pi${suffix}.request.json`),
+      `${JSON.stringify(capture.body, null, 2)}\n`,
+    );
+    await writeFile(
+      path.join(artifactsDirectory, `pi${suffix}.request.canonical.json`),
+      `${JSON.stringify(stable(capture.body), null, 2)}\n`,
+    );
+  }
   await writeFile(path.join(artifactsDirectory, "comparison.json"), `${JSON.stringify(result, null, 2)}\n`);
 
   const markdownRows = rows
     .map((row) => `| ${row.field} | \`${row.openCode}\` | \`${row.pi}\` | ${row.equal ? "yes" : "no"} |`)
     .join("\n");
-  const report = `# Pi and OpenCode first-request comparison
+  const requestRows = requests
+    .map(
+      (request) =>
+        `| ${request.ordinal} | ${request.exactModelVisibleRequest ? "yes" : "no"} | ${request.completeParsedRequest ? "yes" : "no"} | ${request.rawBytesEqual ? "yes" : request.rawDifferenceOnlyKeyOrder ? "key order" : "no"} |`,
+    )
+    .join("\n");
+  const report = `# Pi and OpenCode provider-request comparison
 
 User input: \`${prompt}\`
 
@@ -519,32 +630,42 @@ ${markdownRows}
 | Raw HTTP request-body bytes | ${rawBytesEqual ? "yes" : "no"} |
 | Raw-byte difference is only JSON object-key order | ${rawDifferenceOnlyKeyOrder ? "yes" : "no"} |
 
-${difference ? `First model-visible difference: \`${difference.pointer}\`\n\n\`\`\`json\n${JSON.stringify(difference, null, 2)}\n\`\`\`\n` : "No model-visible differences found.\n"}
-The complete parsed requests are available in [opencode.request.json](opencode.request.json) and [pi.request.json](pi.request.json). Their canonical forms can be compared directly:
+| Provider request | Model-visible equal | Parsed body equal | Raw bytes |
+|---:|---:|---:|---:|
+${requestRows}
+
+${difference ? `First model-visible difference in request ${difference.request}: \`${difference.pointer}\`\n\n\`\`\`json\n${JSON.stringify(difference, null, 2)}\n\`\`\`\n` : "No model-visible differences found.\n"}
+The complete parsed requests are available as numbered OpenCode and Pi request artifacts. Their canonical forms can be compared directly:
 
 \`\`\`sh
 diff -u opencode.request.canonical.json pi.request.canonical.json
 \`\`\`
 
-${providerMode === "fixture" ? "The fixed response removes model stochasticity. Equal observed outputs show that both harnesses accepted and rendered the same provider response. They do not test real-model output quality." : providerMode === "replay" ? "The relay made one upstream model call for OpenCode and replayed its exact response bytes to Pi. This removes model stochasticity between the harnesses." : "The relay made one upstream model call per harness. Temperature zero reduces sampling variance but does not guarantee identical provider output."}
+${providerMode === "fixture" ? "The fixed response removes model stochasticity. Equal observed outputs show that both harnesses accepted and rendered the same provider response. They do not test real-model output quality." : providerMode === "replay" ? "The relay made each upstream model call for OpenCode once and replayed the corresponding response bytes to Pi. This removes model stochasticity between the harnesses." : "The relay made independent upstream calls for the harnesses. Temperature zero reduces sampling variance but does not guarantee identical provider output."}
 `;
   await writeFile(path.join(artifactsDirectory, "REPORT.md"), report);
 
   if (!quiet) {
-    console.log("\nPi as OpenCode, first provider request\n");
+    console.log("\nPi as OpenCode, provider requests\n");
     console.log(`User input: ${JSON.stringify(prompt)}`);
     console.log(
       `Provider:   ${providerMode === "fixture" ? 'local deterministic fixture returning "OK"' : `${providerMode}, temperature ${temperature}`}\n`,
     );
     printTable(rows);
+    console.log(`\nProvider requests: OpenCode ${openCodeCaptures.length}, Pi ${piCaptures.length}`);
+    for (const request of requests) {
+      console.log(
+        `  ${request.ordinal}: model-visible ${request.exactModelVisibleRequest ? "equal" : "DIFFERENT"}, parsed ${request.completeParsedRequest ? "equal" : "DIFFERENT"}`,
+      );
+    }
     console.log(`\nRaw HTTP bodies equal: ${rawBytesEqual ? "yes" : "no, JSON object-key order differs"}`);
     console.log(`Artifacts: ${path.relative(repositoryRoot, artifactsDirectory)}/`);
     console.log(
-      `\nResult: ${exactModelVisibleRequest && completeParsedRequest ? "equivalent first request" : "not equivalent"}`,
+      `\nResult: ${exactModelVisibleRequest && completeParsedRequest ? "equivalent provider requests" : "not equivalent"}`,
     );
   }
 
-  const outputMustMatch = providerMode === "fixture";
+  const outputMustMatch = providerMode === "fixture" || providerMode === "replay";
   if (
     !allowDifferences &&
     (!exactModelVisibleRequest || !completeParsedRequest || (outputMustMatch && !outputEqual))
@@ -553,14 +674,45 @@ ${providerMode === "fixture" ? "The fixed response removes model stochasticity. 
   }
 }
 
+async function prepareFixture() {
+  await mkdir(fixtureDirectory, { recursive: true });
+  const source = process.env.HARNESS_FIXTURE_SOURCE;
+  if (source) {
+    await cp(path.resolve(source), fixtureDirectory, { recursive: true, force: true });
+  } else {
+    await mkdir(path.join(fixtureDirectory, "src"), { recursive: true });
+    await mkdir(path.join(fixtureDirectory, "skills", "demo"), { recursive: true });
+    await writeFile(
+      path.join(fixtureDirectory, "README.md"),
+      "# Harness equivalence fixture\n\nOpenCode and Pi receive identical copies of this workspace.\n",
+    );
+    await writeFile(
+      path.join(fixtureDirectory, "src", "example.ts"),
+      'export function greeting(name: string) {\n  return `Hello, ${name}!`;\n}\n',
+    );
+    await writeFile(
+      path.join(fixtureDirectory, "skills", "demo", "SKILL.md"),
+      "---\nname: demo\ndescription: A deterministic fixture skill\n---\n\n# Demo skill\n\nReturn deterministic fixture output.\n",
+    );
+    await writeFile(path.join(fixtureDirectory, "skills", "demo", "reference.txt"), "fixture reference\n");
+  }
+  await run("git", ["init", "--quiet"], { cwd: fixtureDirectory, env: process.env });
+  await cp(fixtureDirectory, fixtureSnapshotDirectory, { recursive: true, force: true });
+}
+
+async function restoreFixture() {
+  await rm(fixtureDirectory, { recursive: true, force: true });
+  await cp(fixtureSnapshotDirectory, fixtureDirectory, { recursive: true, force: true });
+}
+
 async function main() {
   assertSupportedNode();
   await rm(stateDirectory, { recursive: true, force: true });
   await rm(artifactsDirectory, { recursive: true, force: true });
   await mkdir(stateDirectory, { recursive: true });
   await mkdir(artifactsDirectory, { recursive: true });
-  await mkdir(fixtureDirectory, { recursive: true });
-  await run("git", ["init", "--quiet"], { cwd: fixtureDirectory, env: process.env });
+  await prepareFixture();
+  await restoreFixture();
 
   const server = await startCaptureServer(capturesDirectory, {
     mode: providerMode,
@@ -578,6 +730,7 @@ async function main() {
     openCodeResult = await captureOpenCode(server.baseUrl);
     const openCodeCapture = await readCapture("opencode");
     const contractPath = await writeContract(openCodeCapture.body);
+    await restoreFixture();
     piResult = await capturePi(server.baseUrl, contractPath, openCodeCapture.body);
   } finally {
     await server.close();

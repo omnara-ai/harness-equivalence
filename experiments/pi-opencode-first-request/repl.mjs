@@ -96,28 +96,31 @@ function exactContent(content) {
 }
 
 function printExactSystemPrompts(run) {
-  const pairs = [
-    ["OpenCode", systemMessages(run.openCodeRequest)],
-    ["Pi", systemMessages(run.piRequest)],
-  ];
-  for (const [harness, messages] of pairs) {
-    console.log(`\n===== ${harness} exact system message${messages.length === 1 ? "" : "s"} =====`);
-    messages.forEach((message, index) => {
-      if (messages.length > 1) console.log(`\n--- system message ${index + 1} ---`);
-      process.stdout.write(exactContent(message.content));
-      if (!exactContent(message.content).endsWith("\n")) process.stdout.write("\n");
-    });
-    console.log(`===== end ${harness} system =====`);
+  const pairs = [["OpenCode", run.openCodeRequests], ["Pi", run.piRequests]];
+  for (const [harness, requests] of pairs) {
+    for (let requestIndex = 0; requestIndex < requests.length; requestIndex += 1) {
+      const messages = systemMessages(requests[requestIndex]);
+      console.log(
+        `\n===== ${harness} request ${requestIndex + 1} system message${messages.length === 1 ? "" : "s"} =====`,
+      );
+      messages.forEach((message, messageIndex) => {
+        if (messages.length > 1) console.log(`\n--- system message ${messageIndex + 1} ---`);
+        process.stdout.write(exactContent(message.content));
+        if (!exactContent(message.content).endsWith("\n")) process.stdout.write("\n");
+      });
+      console.log(`===== end ${harness} request ${requestIndex + 1} system =====`);
+    }
   }
 }
 
 function printExactRequests(run) {
-  console.log("\n===== OpenCode parsed provider request =====");
-  console.log(JSON.stringify(run.openCodeRequest, null, 2));
-  console.log("===== end OpenCode request =====");
-  console.log("\n===== Pi parsed provider request =====");
-  console.log(JSON.stringify(run.piRequest, null, 2));
-  console.log("===== end Pi request =====");
+  for (const [harness, requests] of [["OpenCode", run.openCodeRequests], ["Pi", run.piRequests]]) {
+    requests.forEach((request, index) => {
+      console.log(`\n===== ${harness} parsed provider request ${index + 1} =====`);
+      console.log(JSON.stringify(request, null, 2));
+      console.log(`===== end ${harness} request ${index + 1} =====`);
+    });
+  }
 }
 
 function printHelp() {
@@ -133,6 +136,16 @@ Commands
 
 async function readJson(filename) {
   return JSON.parse(await readFile(filename, "utf8"));
+}
+
+async function readRequests(artifactDirectory, harness, count) {
+  return Promise.all(
+    Array.from({ length: count }, (_, index) => {
+      const ordinal = index + 1;
+      const suffix = ordinal === 1 ? "" : `.${ordinal}`;
+      return readJson(path.join(artifactDirectory, `${harness}${suffix}.request.json`));
+    }),
+  );
 }
 
 async function comparePrompt(userPrompt) {
@@ -157,15 +170,22 @@ async function comparePrompt(userPrompt) {
   });
 
   const comparison = await readJson(path.join(artifactDirectory, "comparison.json"));
-  const openCodeRequest = await readJson(path.join(artifactDirectory, "opencode.request.json"));
-  const piRequest = await readJson(path.join(artifactDirectory, "pi.request.json"));
-  const run = { artifactDirectory, comparison, openCodeRequest, piRequest };
+  const openCodeRequests = await readRequests(
+    artifactDirectory,
+    "opencode",
+    comparison.requestCount.openCode,
+  );
+  const piRequests = await readRequests(artifactDirectory, "pi", comparison.requestCount.pi);
+  const run = { artifactDirectory, comparison, openCodeRequests, piRequests };
   lastRun = run;
 
   console.log(
     `Requests equal: ${comparison.completeParsedRequest ? "yes" : "NO"}  |  ` +
       `System prompts equal: ${comparison.systemPromptsEqual ? "yes" : "NO"}  |  ` +
       `Temperature: ${comparison.temperature}`,
+  );
+  console.log(
+    `Provider calls: OpenCode ${comparison.requestCount.openCode}  |  Pi ${comparison.requestCount.pi}`,
   );
   console.log(
     `System prompt SHA-256: OpenCode ${comparison.openCodeSystemPromptSha256.slice(0, 12)}  |  ` +
@@ -225,7 +245,7 @@ async function main() {
     `Provider mode: ${providerMode}${providerMode === "replay" ? " (one model response replayed exactly to both harnesses)" : ""}`,
   );
   console.log(`Temperature: ${temperature}`);
-  console.log("Each input is a fresh first turn. Type :help for inspection commands.\n");
+  console.log("Each input starts a fresh comparison session. Type :help for inspection commands.\n");
 
   if (initialPrompt) {
     await comparePrompt(initialPrompt);

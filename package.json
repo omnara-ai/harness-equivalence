@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "repl": "node experiments/pi-opencode-first-request/repl.mjs",
-    "test": "node test/live-replay.mjs",
+    "test": "node test/live-replay.mjs && node test/tool-replay.mjs && node test/tool-sequence-replay.mjs && node test/task-replay.mjs && TASK_TEST_TYPE=explore node test/task-replay.mjs",
     "verify": "node experiments/pi-opencode-first-request/run.mjs"
   },
   "engines": {
@@ -14,6 +14,8 @@
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.84.3",
-    "opencode-ai": "1.18.22"
+    "htmlparser2": "8.0.2",
+    "opencode-ai": "1.18.22",
+    "turndown": "7.2.0"
   }
 }
