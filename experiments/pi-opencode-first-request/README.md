@@ -53,18 +53,9 @@ export OPENAI_API_KEY=your-key
 ./repl
 ```
 
-Each prompt starts a fresh comparison. The model can call tools inside a generated fixture repository. OpenCode and Pi outputs are shown side by side. When Pi sends the same parsed request as OpenCode, the relay gives it the exact same model response.
+Each prompt starts a fresh comparison. The model can call tools inside a generated fixture repository. Every model call is shown side by side. When Pi sends the same parsed request as OpenCode, the relay gives it the exact same model response.
 
-At the first differing model-visible item, the REPL shows both values and an isolated diff. You can keep Pi's value or replace it with OpenCode's in Pi's model requests. The prompt appears only once because later differences are no longer useful as an equivalence check.
-
-Useful commands:
-
-```text
-:system    print every captured system message
-:requests  print every complete provider request
-:artifacts show the generated files for the last comparison
-:quit      exit
-```
+Model-produced text, reasoning, and tool calls from replayed responses are normalized automatically. If an independently executed tool result differs, the REPL shows both values and asks which one to keep. Type `:quit` to exit.
 
 The `bash` adapter does not implement OpenCode's permission gate. Commands start in the copied fixture, but a command using absolute paths still has the permissions of your account. Inspect model-generated commands before using this against an untrusted provider.
 

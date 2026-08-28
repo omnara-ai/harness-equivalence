@@ -7,6 +7,7 @@ import { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { MODEL_ID } from "./config.mjs";
 import { promptForDivergence } from "./divergence-ui.mjs";
+import { formatModelResponse } from "./response-display.mjs";
 
 const experimentDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(experimentDirectory, "../..");
@@ -15,7 +16,24 @@ const openCodeLabel = "OpenCode";
 const piLabel = "Pi + OpenCode extension";
 const sessionId = `repl-${Date.now()}`;
 let turn = 0;
-let lastRun;
+const ansiPattern = /\u001b\[[0-9;]*m/g;
+const colorEnabled = stdout.isTTY && !process.env.NO_COLOR;
+
+function color(code, value) {
+  return colorEnabled ? `\u001b[${code}m${value}\u001b[0m` : value;
+}
+
+function padStyled(value, width) {
+  const visibleLength = value.replace(ansiPattern, "").length;
+  return `${value}${" ".repeat(Math.max(0, width - visibleLength))}`;
+}
+
+function styleOutputLine(value) {
+  return value
+    .replace(/^\[commentary\]/, color("34;1", "[commentary]"))
+    .replace(/^\[tool\]/, color("33;1", "[tool]"))
+    .replace(/^\[final\]/, color("32;1", "[final]"));
+}
 
 function runProcess(command, args, options) {
   return new Promise((resolve, reject) => {
@@ -103,77 +121,52 @@ function printSideBySide(left, right) {
   const leftLines = wrapText(left || "(no text output)", columnWidth);
   const rightLines = wrapText(right || "(no text output)", columnWidth);
   const count = Math.max(leftLines.length, rightLines.length);
-  console.log(`\n${openCodeLabel.padEnd(columnWidth)} | ${piLabel}`);
-  console.log(`${"-".repeat(columnWidth)}-+-${"-".repeat(columnWidth)}`);
+  const leftHeader = color("36;1", openCodeLabel);
+  const rightHeader = color("35;1", piLabel);
+  console.log(`${padStyled(leftHeader, columnWidth)} | ${rightHeader}`);
+  console.log(color("2", `${"-".repeat(columnWidth)}-+-${"-".repeat(columnWidth)}`));
   for (let index = 0; index < count; index += 1) {
-    console.log(`${(leftLines[index] ?? "").padEnd(columnWidth)} | ${rightLines[index] ?? ""}`);
+    const leftLine = (leftLines[index] ?? "").padEnd(columnWidth);
+    const rightLine = rightLines[index] ?? "";
+    console.log(`${styleOutputLine(leftLine)} | ${styleOutputLine(rightLine)}`);
   }
-}
-
-function systemMessages(request) {
-  return request.input.filter(
-    (message) => message.role === "system" || message.role === "developer",
-  );
-}
-
-function exactContent(content) {
-  return typeof content === "string" ? content : JSON.stringify(content, null, 2);
-}
-
-function printExactSystemPrompts(run) {
-  const pairs = [[openCodeLabel, run.openCodeRequests], [piLabel, run.piRequests]];
-  for (const [harness, requests] of pairs) {
-    for (let requestIndex = 0; requestIndex < requests.length; requestIndex += 1) {
-      const messages = systemMessages(requests[requestIndex]);
-      console.log(
-        `\n===== ${harness} request ${requestIndex + 1} system message${messages.length === 1 ? "" : "s"} =====`,
-      );
-      messages.forEach((message, messageIndex) => {
-        if (messages.length > 1) console.log(`\n--- system message ${messageIndex + 1} ---`);
-        process.stdout.write(exactContent(message.content));
-        if (!exactContent(message.content).endsWith("\n")) process.stdout.write("\n");
-      });
-      console.log(`===== end ${harness} request ${requestIndex + 1} system =====`);
-    }
-  }
-}
-
-function printExactRequests(run) {
-  for (const [harness, requests] of [
-    [openCodeLabel, run.openCodeRequests],
-    [piLabel, run.piRequests],
-  ]) {
-    requests.forEach((request, index) => {
-      console.log(`\n===== ${harness} parsed provider request ${index + 1} =====`);
-      console.log(JSON.stringify(request, null, 2));
-      console.log(`===== end ${harness} request ${index + 1} =====`);
-    });
-  }
-}
-
-function printHelp() {
-  console.log(`
-Commands
-  :system    Print both exact system messages sent to the model
-  :requests  Print both complete parsed provider requests
-  :artifacts Show the files generated for the last comparison
-  :help      Show these commands
-  :quit      Exit
-`);
 }
 
 async function readJson(filename) {
   return JSON.parse(await readFile(filename, "utf8"));
 }
 
-async function readRequests(artifactDirectory, harness, count) {
+async function readModelResponses(artifactDirectory, harness, count) {
   return Promise.all(
     Array.from({ length: count }, (_, index) => {
       const ordinal = index + 1;
       const suffix = ordinal === 1 ? "" : `.${ordinal}`;
-      return readJson(path.join(artifactDirectory, `${harness}${suffix}.request.json`));
+      return readFile(
+        path.join(artifactDirectory, "captures", `${harness}${suffix}.response.raw`),
+        "utf8",
+      ).then(formatModelResponse);
     }),
   );
+}
+
+function printModelCalls(comparison, openCodeResponses, piResponses) {
+  const count = Math.max(openCodeResponses.length, piResponses.length);
+  for (let index = 0; index < count; index += 1) {
+    const request = comparison.requests[index];
+    const matched = request?.completeParsedRequest === true;
+    const label = color("1;34", `[Model call ${index + 1}]`);
+    const difference = matched ? "" : color("31;1", " requests differ");
+    console.log(`\n${label}${difference}`);
+    printSideBySide(openCodeResponses[index], piResponses[index]);
+  }
+
+  const matched = comparison.requests.filter((request) => request.completeParsedRequest).length;
+  const noun = count === 1 ? "model call" : "model calls";
+  if (matched === count && openCodeResponses.length === piResponses.length) {
+    console.log(`\n${color("32;1", "✓")} All ${count} ${noun} matched`);
+  } else {
+    console.log(`\n${color("31;1", "✗")} ${matched}/${count} ${noun} matched`);
+  }
 }
 
 async function comparePrompt(userPrompt, readline) {
@@ -196,31 +189,17 @@ async function comparePrompt(userPrompt, readline) {
   });
 
   const comparison = await readJson(path.join(artifactDirectory, "comparison.json"));
-  const openCodeRequests = await readRequests(
+  const openCodeResponses = await readModelResponses(
     artifactDirectory,
     "opencode",
     comparison.requestCount.openCode,
   );
-  const piRequests = await readRequests(artifactDirectory, "pi", comparison.requestCount.pi);
-  const run = { artifactDirectory, comparison, openCodeRequests, piRequests };
-  lastRun = run;
-
-  console.log(
-    `Requests equal: ${comparison.completeParsedRequest ? "yes" : "NO"}  |  ` +
-      `System prompts equal: ${comparison.systemPromptsEqual ? "yes" : "NO"}`,
+  const piResponses = await readModelResponses(
+    artifactDirectory,
+    "pi",
+    comparison.requestCount.pi,
   );
-  console.log(
-    `Provider calls: ${openCodeLabel} ${comparison.requestCount.openCode}  |  ` +
-      `${piLabel} ${comparison.requestCount.pi}`,
-  );
-  console.log(
-    `System prompt SHA-256: ${openCodeLabel} ${comparison.openCodeSystemPromptSha256.slice(0, 12)}  |  ` +
-      `${piLabel} ${comparison.piSystemPromptSha256.slice(0, 12)}`,
-  );
-  printSideBySide(comparison.openCodeOutput, comparison.piOutput);
-  console.log(`\nExact requests: ${path.relative(repositoryRoot, artifactDirectory)}/`);
-  console.log("Type :system to print both exact system prompts.");
-  return run;
+  printModelCalls(comparison, openCodeResponses, piResponses);
 }
 
 function assertConfiguration() {
@@ -251,56 +230,23 @@ async function ensureApiKey() {
   }
 }
 
-async function handleCommand(input) {
-  if (input === ":quit" || input === ":q" || input === ":exit") return "quit";
-  if (input === ":help") {
-    printHelp();
-    return "handled";
-  }
-  if (input === ":system") {
-    if (!lastRun) console.log("Run a prompt first.");
-    else printExactSystemPrompts(lastRun);
-    return "handled";
-  }
-  if (input === ":requests") {
-    if (!lastRun) console.log("Run a prompt first.");
-    else printExactRequests(lastRun);
-    return "handled";
-  }
-  if (input === ":artifacts") {
-    if (!lastRun) console.log("Run a prompt first.");
-    else console.log(lastRun.artifactDirectory);
-    return "handled";
-  }
-  if (input.startsWith(":")) {
-    console.log(`Unknown command: ${input}. Type :help for available commands.`);
-    return "handled";
-  }
-  return "prompt";
-}
-
 async function main() {
   assertConfiguration();
   await ensureApiKey();
   console.log(`\n${openCodeLabel} vs ${piLabel}`);
   console.log(`Model: ${MODEL_ID}`);
-  console.log("Pi is unmodified. The extension supplies OpenCode's system prompt and tools.");
-  console.log("When the requests match, Pi receives the same model response as OpenCode.");
-  console.log("Each input starts a fresh comparison session. Type :help for inspection commands.\n");
+  console.log("Each input starts a fresh run. Type :quit to exit.\n");
 
   const readline = createInterface({ input: stdin, output: stdout });
   try {
     while (true) {
       const input = (await readline.question("you> ")).trim();
       if (!input) continue;
-      const action = await handleCommand(input);
-      if (action === "quit") break;
-      if (action === "prompt") {
-        try {
-          await comparePrompt(input, readline);
-        } catch (error) {
-          console.error(`\n${error instanceof Error ? error.message : String(error)}\n`);
-        }
+      if ([":quit", ":q", ":exit"].includes(input)) break;
+      try {
+        await comparePrompt(input, readline);
+      } catch (error) {
+        console.error(`\n${error instanceof Error ? error.message : String(error)}\n`);
       }
     }
   } finally {

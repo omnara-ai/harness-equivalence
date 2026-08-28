@@ -16,15 +16,6 @@ A local relay captures every provider request. When Pi sends the same parsed req
 
 Because matching requests receive the same model-response bytes, text, reasoning, and tool calls from replayed responses are normalized automatically. If the independently executed tool result differs, the CLI shows both results and asks which one to keep. It only asks once because the histories have diverged after that point.
 
-The initial request and tested ordinary tool loops match after parsing. Complete requests, responses, outputs, and reports are written under `experiments/pi-opencode-first-request/artifacts/`.
-
-## Commands
-
-```text
-:system    print every exact system message sent to the model
-:requests  print every complete parsed provider request
-:artifacts show the generated files for the last comparison
-:quit      exit
-```
+The initial request and tested ordinary tool loops match after parsing.
 
 See [the experiment README](experiments/pi-opencode-first-request/README.md) for tool coverage and known differences. To run the deterministic checks locally, use `npm test` and `./verify`.
