@@ -43,6 +43,8 @@ const shell =
   (process.platform === "win32" ? "cmd.exe" : "/bin/sh");
 const quiet = process.env.HARNESS_QUIET === "1";
 const allowDifferences = process.env.HARNESS_ALLOW_DIFFERENCES === "1";
+const interactiveDivergence = process.env.HARNESS_INTERACTIVE_DIVERGENCE === "1";
+let divergenceMessageOrdinal = 0;
 
 const versions = {
   openCode: {
@@ -198,6 +200,35 @@ function assertSupportedNode() {
   if (!["fixture", "replay"].includes(providerMode)) {
     throw new Error(`HARNESS_PROVIDER_MODE must be fixture or replay. Received: ${providerMode}`);
   }
+  if (interactiveDivergence && typeof process.send !== "function") {
+    throw new Error("Interactive divergence handling requires an IPC parent process");
+  }
+}
+
+function requestDivergenceDecision(divergence) {
+  const id = `divergence-${++divergenceMessageOrdinal}`;
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      process.off("message", onMessage);
+      process.off("disconnect", onDisconnect);
+    };
+    const onMessage = (message) => {
+      if (!message || message.type !== "divergence-decision" || message.id !== id) return;
+      cleanup();
+      resolve(Boolean(message.useOpenCode));
+    };
+    const onDisconnect = () => {
+      cleanup();
+      reject(new Error("The REPL disconnected while waiting for a divergence decision"));
+    };
+    process.on("message", onMessage);
+    process.once("disconnect", onDisconnect);
+    process.send({ type: "divergence", id, divergence }, (error) => {
+      if (!error) return;
+      cleanup();
+      reject(error);
+    });
+  });
 }
 
 async function writeOpenCodeConfig(baseUrl) {
@@ -504,7 +535,7 @@ async function compare(openCodeResult, piResult) {
       };
     }
     const openCodeBody = openCodeCapture.body;
-    const piBody = piCapture.body;
+    const piBody = piCapture.effectiveBody ?? piCapture.body;
     const openCodeVisible = modelVisible(openCodeBody);
     const piVisible = modelVisible(piBody);
     const canonicalOpenCodeBody = stable(openCodeBody);
@@ -521,6 +552,7 @@ async function compare(openCodeResult, piResult) {
       completeParsedRequest,
       rawBytesEqual,
       rawDifferenceOnlyKeyOrder: !rawBytesEqual && compactJson && completeParsedRequest,
+      overrideApplied: Boolean(piCapture.overrideApplied),
       openCodeRawBodySha256: sha256(openCodeCapture.rawBody),
       piRawBodySha256: sha256(piCapture.rawBody),
       openCodeCanonicalBodySha256: sha256(JSON.stringify(canonicalOpenCodeBody)),
@@ -532,7 +564,7 @@ async function compare(openCodeResult, piResult) {
   const firstPiCapture = piByOrdinal.get(1);
   if (!firstOpenCodeCapture || !firstPiCapture) throw new Error("Both harnesses must produce a first provider request");
   const openCodeBody = firstOpenCodeCapture.body;
-  const piBody = firstPiCapture.body;
+  const piBody = firstPiCapture.effectiveBody ?? firstPiCapture.body;
   const canonicalOpenCodeBody = stable(openCodeBody);
   const canonicalPiBody = stable(piBody);
   const rows = comparisonRows(openCodeBody, piBody, openCodeOutput, piOutput);
@@ -554,6 +586,7 @@ async function compare(openCodeResult, piResult) {
     providerMode,
     deterministicProviderResponse: providerMode === "fixture" ? "OK" : undefined,
     requestCount: { openCode: openCodeCaptures.length, pi: piCaptures.length },
+    overridesApplied: piCaptures.filter((capture) => capture.overrideApplied).length,
     requests,
     exactModelVisibleRequest,
     completeParsedRequest,
@@ -585,14 +618,21 @@ async function compare(openCodeResult, piResult) {
   }
   for (const capture of piCaptures) {
     const suffix = capture.ordinal === 1 ? "" : `.${capture.ordinal}`;
+    const requestBody = capture.effectiveBody ?? capture.body;
     await writeFile(
       path.join(artifactsDirectory, `pi${suffix}.request.json`),
-      `${JSON.stringify(capture.body, null, 2)}\n`,
+      `${JSON.stringify(requestBody, null, 2)}\n`,
     );
     await writeFile(
       path.join(artifactsDirectory, `pi${suffix}.request.canonical.json`),
-      `${JSON.stringify(stable(capture.body), null, 2)}\n`,
+      `${JSON.stringify(stable(requestBody), null, 2)}\n`,
     );
+    if (capture.effectiveBody) {
+      await writeFile(
+        path.join(artifactsDirectory, `pi${suffix}.request.original.json`),
+        `${JSON.stringify(capture.body, null, 2)}\n`,
+      );
+    }
   }
   await writeFile(path.join(artifactsDirectory, "comparison.json"), `${JSON.stringify(result, null, 2)}\n`);
 
@@ -627,6 +667,7 @@ ${markdownRows}
 ${requestRows}
 
 ${difference ? `First model-visible difference in request ${difference.request}: \`${difference.pointer}\`\n\n\`\`\`json\n${JSON.stringify(difference, null, 2)}\n\`\`\`\n` : "No model-visible differences found.\n"}
+${result.overridesApplied > 0 ? `The model-facing Pi request includes the accepted OpenCode value. Pi's original request is preserved in the corresponding \`pi*.request.original.json\` artifact.\n` : ""}
 The complete parsed requests are available as numbered OpenCode and Pi request artifacts. Their canonical forms can be compared directly:
 
 \`\`\`sh
@@ -708,6 +749,7 @@ async function main() {
 
   const server = await startCaptureServer(capturesDirectory, {
     mode: providerMode,
+    onDivergence: interactiveDivergence ? requestDivergenceDecision : undefined,
     upstream:
       providerMode === "fixture"
         ? undefined

@@ -3,6 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
 import path from "node:path";
 import { MODEL_ID } from "./config.mjs";
+import { createDivergenceController } from "./divergence.mjs";
 
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
@@ -135,18 +136,33 @@ async function requestUpstream(upstream, rawBody) {
   };
 }
 
-async function recordResponse(outputDirectory, harness, suffix, upstreamResponse, replayed) {
+async function recordResponse(
+  outputDirectory,
+  harness,
+  suffix,
+  upstreamResponse,
+  replayed,
+  details = {},
+) {
   const metadata = {
     status: upstreamResponse.status,
     statusText: upstreamResponse.statusText,
     headers: upstreamResponse.headers,
     replayed,
+    ...details,
   };
   await writeFile(
     path.join(outputDirectory, `${harness}${suffix}.response.json`),
     `${JSON.stringify(metadata, null, 2)}\n`,
   );
   await writeFile(path.join(outputDirectory, `${harness}${suffix}.response.raw`), upstreamResponse.rawBody);
+}
+
+async function recordCapture(outputDirectory, harness, suffix, capture) {
+  await writeFile(
+    path.join(outputDirectory, `${harness}${suffix}.capture.json`),
+    `${JSON.stringify(capture, null, 2)}\n`,
+  );
 }
 
 function sendBufferedResponse(response, upstreamResponse) {
@@ -163,6 +179,7 @@ export async function startCaptureServer(outputDirectory, options = {}) {
   if (!["fixture", "replay"].includes(mode)) throw new Error(`Unknown capture mode: ${mode}`);
   const requestCounts = new Map();
   const openCodeExchanges = new Map();
+  const resolveDivergence = createDivergenceController(options.onDivergence);
 
   const server = createServer(async (request, response) => {
     try {
@@ -197,25 +214,54 @@ export async function startCaptureServer(outputDirectory, options = {}) {
         rawBody,
         body,
       };
-      await writeFile(
-        path.join(outputDirectory, `${harness}${suffix}.capture.json`),
-        `${JSON.stringify(capture, null, 2)}\n`,
-      );
 
       if (mode === "fixture") {
+        await recordCapture(outputDirectory, harness, suffix, capture);
         sendFixedResponse(response, body);
         return;
       }
 
       if (mode === "replay" && harness === "pi") {
         const recorded = openCodeExchanges.get(ordinal);
-        if (recorded && isDeepStrictEqual(stable(recorded.request), stable(body))) {
-          await recordResponse(outputDirectory, harness, suffix, recorded.response, true);
+        let effectiveBody = body;
+        let overrideApplied = false;
+
+        if (recorded) {
+          const resolved = await resolveDivergence(recorded.request, body, ordinal);
+          effectiveBody = resolved.effectiveBody;
+          overrideApplied = resolved.overrideApplied;
+          if (resolved.decision) {
+            await writeFile(
+              path.join(outputDirectory, "divergence.json"),
+              `${JSON.stringify(resolved.decision, null, 2)}\n`,
+            );
+          }
+        }
+
+        if (overrideApplied) {
+          capture.overrideApplied = true;
+          capture.effectiveBody = effectiveBody;
+        }
+        await recordCapture(outputDirectory, harness, suffix, capture);
+
+        if (recorded && isDeepStrictEqual(stable(recorded.request), stable(effectiveBody))) {
+          await recordResponse(outputDirectory, harness, suffix, recorded.response, true, {
+            overrideApplied,
+          });
           sendBufferedResponse(response, recorded.response);
           return;
         }
+
+        const effectiveRawBody = overrideApplied ? JSON.stringify(effectiveBody) : rawBody;
+        const upstreamResponse = await requestUpstream(options.upstream, effectiveRawBody);
+        await recordResponse(outputDirectory, harness, suffix, upstreamResponse, false, {
+          overrideApplied,
+        });
+        sendBufferedResponse(response, upstreamResponse);
+        return;
       }
 
+      await recordCapture(outputDirectory, harness, suffix, capture);
       const upstreamResponse = await requestUpstream(options.upstream, rawBody);
       if (mode === "replay" && harness === "opencode") {
         openCodeExchanges.set(ordinal, { request: body, response: upstreamResponse });

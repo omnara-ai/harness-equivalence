@@ -5,6 +5,7 @@ import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { fileURLToPath } from "node:url";
 import { MODEL_ID } from "./config.mjs";
+import { promptForDivergence } from "./divergence-ui.mjs";
 
 const experimentDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(experimentDirectory, "../..");
@@ -18,17 +19,44 @@ let lastRun;
 
 function runProcess(command, args, options) {
   return new Promise((resolve, reject) => {
+    const interactive = typeof options.onDivergence === "function";
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: options.env,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: interactive ? ["ignore", "pipe", "pipe", "ipc"] : ["ignore", "pipe", "pipe"],
     });
     let capturedStdout = "";
     let capturedStderr = "";
+    let interactionError;
     child.stdout.on("data", (chunk) => (capturedStdout += chunk));
     child.stderr.on("data", (chunk) => (capturedStderr += chunk));
+    if (interactive) {
+      child.on("message", (message) => {
+        if (!message || message.type !== "divergence" || typeof message.id !== "string") return;
+        Promise.resolve(options.onDivergence(message.divergence))
+          .then((useOpenCode) => {
+            if (child.connected) {
+              child.send({
+                type: "divergence-decision",
+                id: message.id,
+                useOpenCode: Boolean(useOpenCode),
+              });
+            }
+          })
+          .catch((error) => {
+            interactionError = error;
+            if (child.connected) {
+              child.send({ type: "divergence-decision", id: message.id, useOpenCode: false });
+            }
+          });
+      });
+    }
     child.once("error", reject);
     child.once("exit", (code, signal) => {
+      if (interactionError) {
+        reject(interactionError);
+        return;
+      }
       if (code === 0) {
         resolve({ stdout: capturedStdout, stderr: capturedStderr });
         return;
@@ -148,7 +176,7 @@ async function readRequests(artifactDirectory, harness, count) {
   );
 }
 
-async function comparePrompt(userPrompt) {
+async function comparePrompt(userPrompt, readline) {
   turn += 1;
   const runId = `${sessionId}-turn-${String(turn).padStart(3, "0")}`;
   const artifactDirectory = path.join(experimentDirectory, "artifacts", "runs", runId);
@@ -162,7 +190,9 @@ async function comparePrompt(userPrompt) {
       HARNESS_RUN_ID: runId,
       HARNESS_QUIET: "1",
       HARNESS_ALLOW_DIFFERENCES: "1",
+      HARNESS_INTERACTIVE_DIVERGENCE: "1",
     },
+    onDivergence: (divergence) => promptForDivergence(readline, divergence),
   });
 
   const comparison = await readJson(path.join(artifactDirectory, "comparison.json"));
@@ -246,7 +276,7 @@ async function main() {
       if (action === "quit") break;
       if (action === "prompt") {
         try {
-          await comparePrompt(input);
+          await comparePrompt(input, readline);
         } catch (error) {
           console.error(`\n${error instanceof Error ? error.message : String(error)}\n`);
         }

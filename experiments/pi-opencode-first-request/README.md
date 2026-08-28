@@ -53,7 +53,9 @@ export OPENAI_API_KEY=your-key
 ./repl
 ```
 
-Each prompt starts a fresh comparison. The model can call tools inside a generated fixture repository. OpenCode and Pi outputs are shown side by side. When Pi sends the same parsed request as OpenCode, the relay gives it the exact same model response. If the requests differ, Pi makes its own model call.
+Each prompt starts a fresh comparison. The model can call tools inside a generated fixture repository. OpenCode and Pi outputs are shown side by side. When Pi sends the same parsed request as OpenCode, the relay gives it the exact same model response.
+
+At the first differing model-visible item, the REPL shows both values and an isolated diff. You can keep Pi's value or replace it with OpenCode's in Pi's model requests. The prompt appears only once because later differences are no longer useful as an equivalence check.
 
 Useful commands:
 
