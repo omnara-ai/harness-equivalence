@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
+import { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { MODEL_ID } from "./config.mjs";
 import { promptForDivergence } from "./divergence-ui.mjs";
@@ -10,7 +11,6 @@ import { promptForDivergence } from "./divergence-ui.mjs";
 const experimentDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(experimentDirectory, "../..");
 const runner = path.join(experimentDirectory, "run.mjs");
-const apiKey = process.env.OPENAI_API_KEY;
 const openCodeLabel = "OpenCode";
 const piLabel = "Pi + OpenCode extension";
 const sessionId = `repl-${Date.now()}`;
@@ -225,10 +225,30 @@ async function comparePrompt(userPrompt, readline) {
 
 function assertConfiguration() {
   const [major, minor] = process.versions.node.split(".").map(Number);
-  if (major < 22 || (major === 22 && minor < 19)) {
-    throw new Error(`Node 22.19 or newer is required. Current version: ${process.versions.node}`);
+  if (major < 22 || (major === 22 && minor < 10)) {
+    throw new Error(`Node 22.10 or newer is required. Current version: ${process.versions.node}`);
   }
-  if (!apiKey) throw new Error("Set OPENAI_API_KEY before starting the REPL.");
+}
+
+async function ensureApiKey() {
+  if (process.env.OPENAI_API_KEY?.trim()) return;
+  if (!stdin.isTTY) throw new Error("Set OPENAI_API_KEY before starting the REPL.");
+
+  const mutedOutput = new Writable({
+    write(_chunk, _encoding, callback) {
+      callback();
+    },
+  });
+  const secretInput = createInterface({ input: stdin, output: mutedOutput, terminal: true });
+  stdout.write("OpenAI API key: ");
+  try {
+    const apiKey = (await secretInput.question("")).trim();
+    if (!apiKey) throw new Error("An OpenAI API key is required.");
+    process.env.OPENAI_API_KEY = apiKey;
+  } finally {
+    secretInput.close();
+    stdout.write("\n");
+  }
 }
 
 async function handleCommand(input) {
@@ -261,6 +281,7 @@ async function handleCommand(input) {
 
 async function main() {
   assertConfiguration();
+  await ensureApiKey();
   console.log(`\n${openCodeLabel} vs ${piLabel}`);
   console.log(`Model: ${MODEL_ID}`);
   console.log("Pi is unmodified. The extension supplies OpenCode's system prompt and tools.");

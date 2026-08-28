@@ -2,13 +2,11 @@
 
 Run the same task through vanilla OpenCode and Pi configured with OpenCode's system prompt and tools, then compare their exact model requests and outputs.
 
-Set `OPENAI_API_KEY`, then run:
-
 ```shell
 npx -y github:omnara-ai/harness-equivalence
 ```
 
-Requires Node.js 22.19 or newer.
+The CLI securely prompts for your OpenAI API key if `OPENAI_API_KEY` is not already set. Requires Node.js 22.10 or newer.
 
 ## Methodology
 

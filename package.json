@@ -13,7 +13,7 @@
     "verify": "node experiments/pi-opencode-first-request/run.mjs"
   },
   "engines": {
-    "node": ">=22.19.0"
+    "node": ">=22.10.0"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.84.3",

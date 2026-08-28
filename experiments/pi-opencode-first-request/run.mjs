@@ -193,8 +193,8 @@ function extractPiOutput(stdout) {
 
 function assertSupportedNode() {
   const [major, minor] = process.versions.node.split(".").map(Number);
-  if (major < 22 || (major === 22 && minor < 19)) {
-    throw new Error(`Node 22.19 or newer is required. Current version: ${process.versions.node}`);
+  if (major < 22 || (major === 22 && minor < 10)) {
+    throw new Error(`Node 22.10 or newer is required. Current version: ${process.versions.node}`);
   }
   if (!["fixture", "replay"].includes(providerMode)) {
     throw new Error(`HARNESS_PROVIDER_MODE must be fixture or replay. Received: ${providerMode}`);
