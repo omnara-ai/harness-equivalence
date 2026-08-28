@@ -8,14 +8,10 @@ OPENAI_API_KEY="your-key" npx -y github:omnara-ai/harness-equivalence
 
 Requires Node.js 22.10 or newer. If you omit `OPENAI_API_KEY`, the CLI prompts for it instead.
 
-## Methodology
+## How it works
 
-OpenCode runs first in a generated fixture. Pi runs second in a restored copy of that fixture with one extension supplying OpenCode's system prompt, tool definitions, and compatible tool implementations. Both use GPT-5.6 Terra through OpenAI's Responses API with medium reasoning.
+OpenCode runs the task first. Pi then runs the same task with OpenCode's prompt and tools. Both use the same model and start from identical workspaces.
 
-A local relay captures every provider request. When Pi sends the same parsed request as OpenCode, the relay returns the exact response bytes OpenCode received instead of calling the model again. This keeps model randomness from creating a difference when both harnesses sent the same thing.
+If both harnesses send the model the same input, their behavior should be equivalent. Models are nondeterministic though, so making the same call twice can still produce different outputs. To remove that noise, Pi receives the exact output OpenCode received whenever their inputs match. The CLI shows each model call side by side and only asks what to do if the tools return different results.
 
-Because matching requests receive the same model-response bytes, text, reasoning, and tool calls from replayed responses are normalized automatically. If the independently executed tool result differs, the CLI shows both results and asks which one to keep. It only asks once because the histories have diverged after that point.
-
-The initial request and tested ordinary tool loops match after parsing.
-
-See [the experiment README](experiments/pi-opencode-first-request/README.md) for tool coverage and known differences. To run the deterministic checks locally, use `npm test` and `./verify`.
+See [the experiment README](experiments/pi-opencode-first-request/README.md) for implementation details and limitations.
