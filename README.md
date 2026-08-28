@@ -1,31 +1,26 @@
 # Harness equivalence
 
-Reproducible experiments for testing when two agent harnesses send the same requests to a model.
+Run the same task through vanilla OpenCode and Pi configured with OpenCode's system prompt and tools, then compare their exact model requests and outputs.
 
-The first experiment compares OpenCode with unmodified Pi loaded with one extension. The extension supplies OpenCode's system prompt, tool definitions, and compatible tool implementations. Both use GPT-5.6 Terra through OpenAI's Responses API with medium reasoning. The initial request and tested ordinary tool loops match after parsing.
+Set `OPENAI_API_KEY`, then run:
 
-## Run it
-
-You need Node.js 22.19 or newer. The deterministic checks do not need an API key.
-
-```sh
-git clone git@github.com:omnara-ai/harness-equivalence.git
-cd harness-equivalence
-npm ci
-npm test
-./verify
+```shell
+npx -y github:omnara-ai/harness-equivalence
 ```
 
-The commands write complete requests, responses, outputs, and comparison reports under `experiments/pi-opencode-first-request/artifacts/`.
+Requires Node.js 22.19 or newer.
 
-## Interactive comparison
+## Methodology
 
-```sh
-export OPENAI_API_KEY=your-key
-./repl
-```
+OpenCode runs first in a generated fixture. Pi runs second in a restored copy of that fixture with one extension supplying OpenCode's system prompt, tool definitions, and compatible tool implementations. Both use GPT-5.6 Terra through OpenAI's Responses API with medium reasoning.
 
-Enter a task and both harnesses run against separate copies of the same fixture. OpenCode calls the model first. If Pi sends the same parsed request, it receives the exact same response bytes. At the first difference, the REPL shows the OpenCode and Pi values side by side and asks which one Pi should use. It asks once per run, then continues without interrupting again.
+A local relay captures every provider request. When Pi sends the same parsed request as OpenCode, the relay returns the exact response bytes OpenCode received instead of calling the model again. This keeps model randomness from creating a difference when both harnesses sent the same thing.
+
+At the first difference, the CLI shows the model-visible values side by side with an isolated diff. Keeping Pi's value makes a separate model call. Choosing OpenCode's value substitutes the differing item, then reuses OpenCode's response if the resulting request matches. The CLI only asks once per run because the histories have diverged after that point.
+
+The initial request and tested ordinary tool loops match after parsing. Complete requests, responses, outputs, and reports are written under `experiments/pi-opencode-first-request/artifacts/`.
+
+## Commands
 
 ```text
 :system    print every exact system message sent to the model
@@ -34,4 +29,4 @@ Enter a task and both harnesses run against separate copies of the same fixture.
 :quit      exit
 ```
 
-See [the experiment README](experiments/pi-opencode-first-request/README.md) for the method, tool coverage, and known differences.
+See [the experiment README](experiments/pi-opencode-first-request/README.md) for tool coverage and known differences. To run the deterministic checks locally, use `npm test` and `./verify`.

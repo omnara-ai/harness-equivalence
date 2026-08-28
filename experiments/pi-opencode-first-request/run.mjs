@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { isDeepStrictEqual } from "node:util";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +10,12 @@ import { MODEL_ID, OPENAI_API_BASE_URL } from "./config.mjs";
 
 const experimentDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(experimentDirectory, "../..");
+const require = createRequire(import.meta.url);
+const openCodePackageDirectory = path.dirname(require.resolve("opencode-ai/package.json"));
+const piPackageDirectory = path.resolve(
+  path.dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))),
+  "..",
+);
 const runId = process.env.HARNESS_RUN_ID;
 if (runId && !/^[a-zA-Z0-9_-]+$/.test(runId)) {
   throw new Error("HARNESS_RUN_ID may contain only letters, numbers, underscores, and hyphens");
@@ -23,16 +30,8 @@ const stateDirectory = runId
 const fixtureDirectory = path.join(stateDirectory, "fixture");
 const fixtureSnapshotDirectory = path.join(stateDirectory, "fixture-snapshot");
 const openCodeXdgDirectory = path.join(stateDirectory, "opencode-xdg");
-const openCodeBinary = path.join(repositoryRoot, "node_modules", ".bin", "opencode");
-const piCli = path.join(
-  repositoryRoot,
-  "node_modules",
-  "@earendil-works",
-  "pi-coding-agent",
-  "dist",
-  "bundle",
-  "cli.js",
-);
+const openCodeBinary = path.join(openCodePackageDirectory, "bin", "opencode.exe");
+const piCli = path.join(piPackageDirectory, "dist", "bundle", "cli.js");
 const extension = path.join(experimentDirectory, "pi-opencode-compat.ts");
 const prompt = process.env.HARNESS_PROMPT ?? "Reply with exactly OK. Do not call a tool.";
 const model = MODEL_ID;
