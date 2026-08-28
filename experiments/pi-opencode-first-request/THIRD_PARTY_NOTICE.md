@@ -1,6 +1,6 @@
 # OpenCode notice
 
-Generated artifacts contain prompt text, tool descriptions, and tool schemas captured from OpenCode. The Pi adapter also adapts OpenCode's edit replacement algorithm and model-visible tool behavior. `fixtures/customize-opencode.md` is copied from OpenCode at the pinned source commit.
+Generated artifacts contain prompt text, tool descriptions, and tool schemas captured from OpenCode. The Pi adapter also adapts OpenCode's `apply_patch` algorithm and model-visible tool behavior. `fixtures/customize-opencode.md` is copied from OpenCode at the pinned source commit.
 
 Source: https://github.com/sst/opencode
 

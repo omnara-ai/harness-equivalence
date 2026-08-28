@@ -2,7 +2,7 @@
 
 Reproducible experiments for testing when two agent harnesses send the same requests to a model.
 
-The first experiment reproduces OpenCode with an ordinary Pi extension. It matches the initial provider request and implements OpenCode's ten default tools. A replay test exercises nine ordinary tools and gets equal parsed provider requests through the entire loop. The `task` tool also runs a child Pi agent. Its child request matches, while the parent follow-up contains a different randomly generated child session ID.
+The first experiment compares OpenCode with unmodified Pi loaded with one extension. The extension supplies OpenCode's system prompt, tool definitions, and compatible tool implementations. Both use GPT-5.6 Terra through OpenAI's Responses API with medium reasoning. The initial request and tested ordinary tool loops match after parsing.
 
 ## Run it
 
@@ -25,7 +25,7 @@ export OPENAI_API_KEY=your-key
 ./repl
 ```
 
-Enter a task and both harnesses will run against separate copies of the same fixture. OpenCode calls the model first. The relay then sends each exact model response to Pi. Outputs appear side by side, and the REPL reports whether every parsed provider request matched.
+Enter a task and both harnesses run against separate copies of the same fixture. OpenCode calls the model first. If Pi sends the same parsed request, it receives the exact same response bytes. A differing request makes its own model call. Outputs appear side by side, and the REPL reports whether every parsed request matched.
 
 ```text
 :system    print every exact system message sent to the model
@@ -33,7 +33,5 @@ Enter a task and both harnesses will run against separate copies of the same fix
 :artifacts show the generated files for the last comparison
 :quit      exit
 ```
-
-Use `./repl --independent` to make separate model calls. Set `HARNESS_API_BASE_URL`, `HARNESS_API_KEY`, and `HARNESS_MODEL` for OpenRouter, LiteLLM, Ollama, or another OpenAI-compatible endpoint.
 
 See [the experiment README](experiments/pi-opencode-first-request/README.md) for the method, tool coverage, and known differences.

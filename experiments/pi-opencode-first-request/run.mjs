@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { startCaptureServer } from "./capture-server.mjs";
+import { MODEL_ID, OPENAI_API_BASE_URL } from "./config.mjs";
 
 const experimentDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(experimentDirectory, "../..");
@@ -34,9 +35,8 @@ const piCli = path.join(
 );
 const extension = path.join(experimentDirectory, "pi-opencode-compat.ts");
 const prompt = process.env.HARNESS_PROMPT ?? "Reply with exactly OK. Do not call a tool.";
-const model = process.env.HARNESS_MODEL ?? "gpt-4o-mini";
+const model = MODEL_ID;
 const providerMode = process.env.HARNESS_PROVIDER_MODE ?? "fixture";
-const temperature = Number(process.env.HARNESS_TEMPERATURE ?? "0");
 const shell =
   process.env.HARNESS_SHELL ??
   process.env.SHELL ??
@@ -55,19 +55,20 @@ const versions = {
   },
 };
 
-const generationKeys = [
+const requestOptionKeys = [
   "temperature",
   "top_p",
-  "max_tokens",
-  "max_completion_tokens",
-  "frequency_penalty",
-  "presence_penalty",
-  "seed",
-  "stop",
+  "max_output_tokens",
+  "text",
+  "store",
+  "include",
+  "prompt_cache_key",
+  "prompt_cache_retention",
   "tool_choice",
   "parallel_tool_calls",
-  "reasoning_effort",
-  "response_format",
+  "reasoning",
+  "service_tier",
+  "truncation",
 ];
 
 function run(command, args, options = {}) {
@@ -105,7 +106,6 @@ function run(command, args, options = {}) {
 
 function harnessEnvironment(overrides) {
   const environment = { ...process.env, ...overrides };
-  delete environment.HARNESS_API_KEY;
   delete environment.OPENAI_API_KEY;
   return environment;
 }
@@ -128,21 +128,25 @@ function shortHash(value) {
   return sha256(typeof value === "string" ? value : JSON.stringify(stable(value))).slice(0, 12);
 }
 
-function generationParameters(body) {
-  return Object.fromEntries(generationKeys.filter((key) => key in body).map((key) => [key, body[key]]));
+function requestOptions(body) {
+  return Object.fromEntries(
+    requestOptionKeys.filter((key) => key in body).map((key) => [key, body[key]]),
+  );
 }
 
 function modelVisible(body) {
   return stable({
     model: body.model,
-    messages: body.messages,
+    input: body.input,
     tools: body.tools ?? [],
-    generation: generationParameters(body),
+    requestOptions: requestOptions(body),
   });
 }
 
 function firstSystemPrompt(body) {
-  const systems = body.messages.filter((message) => message.role === "system");
+  const systems = body.input.filter(
+    (message) => (message.role === "system" || message.role === "developer") && typeof message.content === "string",
+  );
   if (systems.length !== 1 || typeof systems[0].content !== "string") {
     throw new Error(`Expected one string system message from OpenCode, received ${systems.length}`);
   }
@@ -191,33 +195,25 @@ function assertSupportedNode() {
   if (major < 22 || (major === 22 && minor < 19)) {
     throw new Error(`Node 22.19 or newer is required. Current version: ${process.versions.node}`);
   }
-  if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2) {
-    throw new Error(`HARNESS_TEMPERATURE must be between 0 and 2. Received: ${process.env.HARNESS_TEMPERATURE}`);
-  }
-  if (!["fixture", "replay", "independent"].includes(providerMode)) {
-    throw new Error(`HARNESS_PROVIDER_MODE must be fixture, replay, or independent. Received: ${providerMode}`);
+  if (!["fixture", "replay"].includes(providerMode)) {
+    throw new Error(`HARNESS_PROVIDER_MODE must be fixture or replay. Received: ${providerMode}`);
   }
 }
 
 async function writeOpenCodeConfig(baseUrl) {
   const config = {
     $schema: "https://opencode.ai/config.json",
-    model: `capture/${model}`,
+    model: `openai/${model}`,
     shell,
-    enabled_providers: ["capture"],
+    enabled_providers: ["openai"],
     share: "disabled",
     skills: {
       paths: [path.join(fixtureDirectory, "skills")],
     },
-    agent: {
-      build: {
-        temperature,
-      },
-    },
     provider: {
-      capture: {
+      openai: {
         name: "Local request capture",
-        npm: "@ai-sdk/openai-compatible",
+        npm: "@ai-sdk/openai",
         env: [],
         models: {
           [model]: {
@@ -252,7 +248,7 @@ async function captureOpenCode(baseUrl) {
     [
       "run",
       "--model",
-      `capture/${model}`,
+      `openai/${model}`,
       "--title",
       "Harness equivalence fixture",
       "--format",
@@ -284,32 +280,29 @@ async function captureOpenCode(baseUrl) {
 
 async function writePiConfig(baseUrl, openCodeBody) {
   const tools = openCodeBody.tools ?? [];
-  const emitsStrict = tools.some((tool) => "strict" in (tool.function ?? {}));
-  const generation = generationParameters(openCodeBody);
-  const maxTokens = generation.max_tokens ?? generation.max_completion_tokens ?? 16384;
+  const emitsStrict = tools.some((tool) => "strict" in tool);
+  const options = requestOptions(openCodeBody);
+  const maxTokens = options.max_output_tokens ?? 16384;
   const config = {
     providers: {
       capture: {
         baseUrl: `${baseUrl}/v1/pi`,
-        api: "openai-completions",
+        api: "openai-responses",
         apiKey: "capture-key",
         authHeader: true,
         compat: {
-          supportsStore: false,
-          supportsDeveloperRole: false,
-          supportsReasoningEffort: false,
+          supportsDeveloperRole: true,
           supportsStrictMode: emitsStrict,
-          maxTokensField: "max_tokens",
         },
         models: [
           {
             id: openCodeBody.model,
             name: "OpenCode equivalence capture fixture",
-            reasoning: false,
+            reasoning: true,
             input: ["text"],
-            contextWindow: 128000,
+            contextWindow: 1050000,
             maxTokens,
-            samplingParams: generation,
+            samplingParams: options,
           },
         ],
       },
@@ -339,7 +332,7 @@ async function capturePi(baseUrl, contractPath, openCodeBody) {
       "--model",
       openCodeBody.model,
       "--thinking",
-      "off",
+      "medium",
       "--no-session",
       "--no-builtin-tools",
       "--no-extensions",
@@ -413,7 +406,7 @@ async function writeContract(openCodeBody) {
     model: openCodeBody.model,
     systemPrompt: firstSystemPrompt(openCodeBody),
     tools: openCodeBody.tools ?? [],
-    generation: generationParameters(openCodeBody),
+    requestOptions: requestOptions(openCodeBody),
   };
   const filename = path.join(artifactsDirectory, "opencode-contract.json");
   await writeFile(filename, `${JSON.stringify(contract, null, 2)}\n`);
@@ -433,10 +426,10 @@ function comparisonRows(openCodeBody, piBody, openCodeOutput, piOutput) {
       equal: openCodeBody.model === piBody.model,
     },
     {
-      field: "Messages",
-      openCode: `${openCodeBody.messages.length} · ${shortHash(openCodeBody.messages)}`,
-      pi: `${piBody.messages.length} · ${shortHash(piBody.messages)}`,
-      equal: isDeepStrictEqual(openCodeVisible.messages, piVisible.messages),
+      field: "Input",
+      openCode: `${openCodeBody.input.length} · ${shortHash(openCodeBody.input)}`,
+      pi: `${piBody.input.length} · ${shortHash(piBody.input)}`,
+      equal: isDeepStrictEqual(openCodeVisible.input, piVisible.input),
     },
     {
       field: "Tools",
@@ -445,10 +438,10 @@ function comparisonRows(openCodeBody, piBody, openCodeOutput, piOutput) {
       equal: isDeepStrictEqual(openCodeVisible.tools, piVisible.tools),
     },
     {
-      field: "Generation controls",
-      openCode: shortHash(generationParameters(openCodeBody)),
-      pi: shortHash(generationParameters(piBody)),
-      equal: isDeepStrictEqual(openCodeVisible.generation, piVisible.generation),
+      field: "Request options",
+      openCode: shortHash(requestOptions(openCodeBody)),
+      pi: shortHash(requestOptions(piBody)),
+      equal: isDeepStrictEqual(openCodeVisible.requestOptions, piVisible.requestOptions),
     },
     {
       field: "Parsed request body",
@@ -472,7 +465,7 @@ function outputSummary(output) {
 }
 
 function printTable(rows) {
-  const headers = ["Field", "OpenCode", "Pi", "Equal"];
+  const headers = ["Field", "OpenCode", "Pi + extension", "Equal"];
   const values = rows.map((row) => [row.field, row.openCode, row.pi, row.equal ? "yes" : "NO"]);
   const widths = headers.map((header, index) =>
     Math.max(header.length, ...values.map((row) => String(row[index]).length)),
@@ -559,7 +552,6 @@ async function compare(openCodeResult, piResult) {
     versions,
     prompt,
     providerMode,
-    temperature,
     deterministicProviderResponse: providerMode === "fixture" ? "OK" : undefined,
     requestCount: { openCode: openCodeCaptures.length, pi: piCaptures.length },
     requests,
@@ -613,13 +605,13 @@ async function compare(openCodeResult, piResult) {
         `| ${request.ordinal} | ${request.exactModelVisibleRequest ? "yes" : "no"} | ${request.completeParsedRequest ? "yes" : "no"} | ${request.rawBytesEqual ? "yes" : request.rawDifferenceOnlyKeyOrder ? "key order" : "no"} |`,
     )
     .join("\n");
-  const report = `# Pi and OpenCode provider-request comparison
+  const report = `# OpenCode and Pi extension provider-request comparison
 
 User input: \`${prompt}\`
 
-Provider mode: \`${providerMode}\`${providerMode === "fixture" ? ", returning deterministic `OK`" : ` at temperature \`${temperature}\``}
+Provider mode: \`${providerMode}\`${providerMode === "fixture" ? ", returning deterministic `OK`" : ""}
 
-| Field | OpenCode | Pi | Equal |
+| Field | OpenCode | Pi + OpenCode extension | Equal |
 |---|---|---|---:|
 ${markdownRows}
 
@@ -641,15 +633,15 @@ The complete parsed requests are available as numbered OpenCode and Pi request a
 diff -u opencode.request.canonical.json pi.request.canonical.json
 \`\`\`
 
-${providerMode === "fixture" ? "The fixed response removes model stochasticity. Equal observed outputs show that both harnesses accepted and rendered the same provider response. They do not test real-model output quality." : providerMode === "replay" ? "The relay made each upstream model call for OpenCode once and replayed the corresponding response bytes to Pi. This removes model stochasticity between the harnesses." : "The relay made independent upstream calls for the harnesses. Temperature zero reduces sampling variance but does not guarantee identical provider output."}
+${providerMode === "fixture" ? "The fixed response removes model stochasticity. Equal observed outputs show that both harnesses accepted and rendered the same provider response. They do not test real-model output quality." : "When Pi sends the same parsed request as OpenCode, the relay gives Pi the exact response bytes returned to OpenCode. A differing request makes its own upstream call."}
 `;
   await writeFile(path.join(artifactsDirectory, "REPORT.md"), report);
 
   if (!quiet) {
-    console.log("\nPi as OpenCode, provider requests\n");
+    console.log("\nOpenCode vs Pi + OpenCode extension\n");
     console.log(`User input: ${JSON.stringify(prompt)}`);
     console.log(
-      `Provider:   ${providerMode === "fixture" ? 'local deterministic fixture returning "OK"' : `${providerMode}, temperature ${temperature}`}\n`,
+      `Provider:   ${providerMode === "fixture" ? 'local deterministic fixture returning "OK"' : providerMode}\n`,
     );
     printTable(rows);
     console.log(`\nProvider requests: OpenCode ${openCodeCaptures.length}, Pi ${piCaptures.length}`);
@@ -665,7 +657,7 @@ ${providerMode === "fixture" ? "The fixed response removes model stochasticity. 
     );
   }
 
-  const outputMustMatch = providerMode === "fixture" || providerMode === "replay";
+  const outputMustMatch = providerMode === "fixture" || (providerMode === "replay" && completeParsedRequest);
   if (
     !allowDifferences &&
     (!exactModelVisibleRequest || !completeParsedRequest || (outputMustMatch && !outputEqual))
@@ -720,8 +712,8 @@ async function main() {
       providerMode === "fixture"
         ? undefined
         : {
-            baseUrl: process.env.HARNESS_API_BASE_URL ?? "https://api.openai.com/v1",
-            apiKey: process.env.HARNESS_API_KEY ?? process.env.OPENAI_API_KEY,
+            baseUrl: process.env.HARNESS_TEST_API_BASE_URL ?? OPENAI_API_BASE_URL,
+            apiKey: process.env.OPENAI_API_KEY,
           },
   });
   let openCodeResult;

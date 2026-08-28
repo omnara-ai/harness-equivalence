@@ -5,12 +5,10 @@ import { createOpenCodeToolRuntime } from "./opencode-tools.mjs";
 
 type OpenCodeTool = {
   type: "function";
-  function: {
-    name: string;
-    description?: string;
-    parameters: Record<string, unknown>;
-    strict?: boolean;
-  };
+  name: string;
+  description?: string;
+  parameters: Record<string, unknown>;
+  strict?: boolean;
 };
 
 type OpenCodeContract = {
@@ -50,31 +48,26 @@ function loadContract(): OpenCodeContract {
 }
 
 function normalizeProviderPayload(payload: unknown) {
-  if (!payload || typeof payload !== "object" || !("messages" in payload)) return payload;
-  const messages = (payload as { messages?: unknown }).messages;
-  if (!Array.isArray(messages)) return payload;
-  const normalized = {
+  if (!payload || typeof payload !== "object" || !("input" in payload)) return payload;
+  const input = (payload as { input?: unknown }).input;
+  if (!Array.isArray(input)) return payload;
+  return {
     ...payload,
-    messages: messages.map((message) => {
+    input: input.map((item) => {
       if (
-        !message ||
-        typeof message !== "object" ||
-        !("role" in message) ||
-        message.role !== "assistant" ||
-        !("tool_calls" in message) ||
-        !("content" in message) ||
-        message.content !== null
+        !item ||
+        typeof item !== "object" ||
+        !("type" in item) ||
+        !["function_call", "reasoning"].includes(String(item.type))
       ) {
-        return message;
+        return item;
       }
-      return { ...message, content: "" };
+      const { id: _id, ...withoutId } = item as Record<string, unknown>;
+      if (item.type !== "reasoning") return withoutId;
+      const { status: _status, ...rest } = withoutId;
+      return rest;
     }),
   };
-  if (process.env.OPENCODE_SUBAGENT_TYPE && "temperature" in normalized) {
-    const { temperature: _temperature, ...withoutTemperature } = normalized;
-    return withoutTemperature;
-  }
-  return normalized;
 }
 
 function run(command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; signal?: AbortSignal }) {
@@ -136,7 +129,7 @@ async function runTask(
   const tools =
     params.subagent_type === "explore"
       ? "bash,glob,grep,read,webfetch"
-      : "bash,edit,glob,grep,read,skill,webfetch,write";
+      : "apply_patch,bash,glob,grep,read,skill,webfetch";
   const result = await run(
     process.execPath,
     [
@@ -147,7 +140,7 @@ async function runTask(
       "--model",
       model,
       "--thinking",
-      "off",
+      "medium",
       "--session-id",
       sessionUuid(params.task_id),
       "--session-dir",
@@ -189,12 +182,12 @@ export default function opencodeCompatibilityProfile(pi: ExtensionAPI) {
 
   for (const tool of contract.tools) {
     pi.registerTool({
-      name: tool.function.name,
-      label: tool.function.name,
-      description: tool.function.description ?? "",
-      parameters: tool.function.parameters,
+      name: tool.name,
+      label: tool.name,
+      description: tool.description ?? "",
+      parameters: tool.parameters,
       async execute(toolCallId, params, signal, _onUpdate, context) {
-        return runtime.execute(tool.function.name, params, {
+        return runtime.execute(tool.name, params, {
           ...context,
           signal: signal ?? context.signal,
           toolCallId,

@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { sendResponse, textResponse } from "./responses-fixture.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const experimentDirectory = path.join(repositoryRoot, "experiments", "pi-opencode-first-request");
@@ -11,36 +12,15 @@ const runner = path.join(experimentDirectory, "run.mjs");
 const runId = `live-replay-test-${process.pid}`;
 let upstreamCalls = 0;
 
-function completionChunk(delta, finishReason = null, usage) {
-  return {
-    id: "chatcmpl-live-replay-test",
-    object: "chat.completion.chunk",
-    created: 1_787_529_600,
-    model: "gpt-4o-mini",
-    choices: [{ index: 0, delta, finish_reason: finishReason }],
-    ...(usage ? { usage } : {}),
-  };
-}
-
 const server = createServer((request, response) => {
-  if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
+  if (request.method !== "POST" || request.url !== "/v1/responses") {
     response.writeHead(404).end();
     return;
   }
   upstreamCalls += 1;
   request.resume();
   request.on("end", () => {
-    response.writeHead(200, { "content-type": "text/event-stream" });
-    response.write(
-      `data: ${JSON.stringify(completionChunk({ role: "assistant", content: "A live replay response." }))}\n\n`,
-    );
-    response.write(`data: ${JSON.stringify(completionChunk({}, "stop"))}\n\n`);
-    response.write(
-      `data: ${JSON.stringify(
-        completionChunk({}, null, { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }),
-      )}\n\n`,
-    );
-    response.end("data: [DONE]\n\n");
+    sendResponse(response, textResponse("A live replay response."));
   });
 });
 
@@ -59,9 +39,7 @@ try {
       ...process.env,
       HARNESS_PROMPT: "Return a short sentence without calling tools.",
       HARNESS_PROVIDER_MODE: "replay",
-      HARNESS_API_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
-      HARNESS_MODEL: "gpt-4o-mini",
-      HARNESS_TEMPERATURE: "0",
+      HARNESS_TEST_API_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
       HARNESS_RUN_ID: runId,
       HARNESS_QUIET: "1",
     },
@@ -86,7 +64,6 @@ try {
   assert.equal(upstreamCalls, 1);
   assert.equal(comparison.completeParsedRequest, true);
   assert.equal(comparison.systemPromptsEqual, true);
-  assert.equal(comparison.temperature, 0);
   assert.equal(comparison.openCodeOutput, "A live replay response.");
   assert.equal(comparison.piOutput, "A live replay response.");
   assert.equal(openCodeResponse.replayed, false);

@@ -4,19 +4,14 @@ import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { fileURLToPath } from "node:url";
+import { MODEL_ID } from "./config.mjs";
 
 const experimentDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(experimentDirectory, "../..");
 const runner = path.join(experimentDirectory, "run.mjs");
-const arguments_ = process.argv.slice(2);
-const fixture = arguments_.includes("--fixture");
-const independent = arguments_.includes("--independent");
-const initialPrompt = arguments_.filter((argument) => !["--fixture", "--independent"].includes(argument)).join(" ");
-const providerMode = fixture ? "fixture" : independent ? "independent" : "replay";
-const model = process.env.HARNESS_MODEL ?? "gpt-4o-mini";
-const temperature = process.env.HARNESS_TEMPERATURE ?? "0";
-const apiBaseUrl = process.env.HARNESS_API_BASE_URL ?? "https://api.openai.com/v1";
-const apiKey = process.env.HARNESS_API_KEY ?? process.env.OPENAI_API_KEY;
+const apiKey = process.env.OPENAI_API_KEY;
+const openCodeLabel = "OpenCode";
+const piLabel = "Pi + OpenCode extension";
 const sessionId = `repl-${Date.now()}`;
 let turn = 0;
 let lastRun;
@@ -80,7 +75,7 @@ function printSideBySide(left, right) {
   const leftLines = wrapText(left || "(no text output)", columnWidth);
   const rightLines = wrapText(right || "(no text output)", columnWidth);
   const count = Math.max(leftLines.length, rightLines.length);
-  console.log(`\n${"OpenCode".padEnd(columnWidth)} | Pi`);
+  console.log(`\n${openCodeLabel.padEnd(columnWidth)} | ${piLabel}`);
   console.log(`${"-".repeat(columnWidth)}-+-${"-".repeat(columnWidth)}`);
   for (let index = 0; index < count; index += 1) {
     console.log(`${(leftLines[index] ?? "").padEnd(columnWidth)} | ${rightLines[index] ?? ""}`);
@@ -88,7 +83,9 @@ function printSideBySide(left, right) {
 }
 
 function systemMessages(request) {
-  return request.messages.filter((message) => message.role === "system");
+  return request.input.filter(
+    (message) => message.role === "system" || message.role === "developer",
+  );
 }
 
 function exactContent(content) {
@@ -96,7 +93,7 @@ function exactContent(content) {
 }
 
 function printExactSystemPrompts(run) {
-  const pairs = [["OpenCode", run.openCodeRequests], ["Pi", run.piRequests]];
+  const pairs = [[openCodeLabel, run.openCodeRequests], [piLabel, run.piRequests]];
   for (const [harness, requests] of pairs) {
     for (let requestIndex = 0; requestIndex < requests.length; requestIndex += 1) {
       const messages = systemMessages(requests[requestIndex]);
@@ -114,7 +111,10 @@ function printExactSystemPrompts(run) {
 }
 
 function printExactRequests(run) {
-  for (const [harness, requests] of [["OpenCode", run.openCodeRequests], ["Pi", run.piRequests]]) {
+  for (const [harness, requests] of [
+    [openCodeLabel, run.openCodeRequests],
+    [piLabel, run.piRequests],
+  ]) {
     requests.forEach((request, index) => {
       console.log(`\n===== ${harness} parsed provider request ${index + 1} =====`);
       console.log(JSON.stringify(request, null, 2));
@@ -152,17 +152,13 @@ async function comparePrompt(userPrompt) {
   turn += 1;
   const runId = `${sessionId}-turn-${String(turn).padStart(3, "0")}`;
   const artifactDirectory = path.join(experimentDirectory, "artifacts", "runs", runId);
-  process.stdout.write("\nRunning OpenCode and Pi...\n");
+  process.stdout.write(`\nRunning ${openCodeLabel} and ${piLabel}...\n`);
   await runProcess(process.execPath, [runner], {
     cwd: repositoryRoot,
     env: {
       ...process.env,
       HARNESS_PROMPT: userPrompt,
-      HARNESS_MODEL: model,
-      HARNESS_TEMPERATURE: temperature,
-      HARNESS_PROVIDER_MODE: providerMode,
-      HARNESS_API_BASE_URL: apiBaseUrl,
-      ...(apiKey ? { HARNESS_API_KEY: apiKey } : {}),
+      HARNESS_PROVIDER_MODE: "replay",
       HARNESS_RUN_ID: runId,
       HARNESS_QUIET: "1",
       HARNESS_ALLOW_DIFFERENCES: "1",
@@ -181,15 +177,15 @@ async function comparePrompt(userPrompt) {
 
   console.log(
     `Requests equal: ${comparison.completeParsedRequest ? "yes" : "NO"}  |  ` +
-      `System prompts equal: ${comparison.systemPromptsEqual ? "yes" : "NO"}  |  ` +
-      `Temperature: ${comparison.temperature}`,
+      `System prompts equal: ${comparison.systemPromptsEqual ? "yes" : "NO"}`,
   );
   console.log(
-    `Provider calls: OpenCode ${comparison.requestCount.openCode}  |  Pi ${comparison.requestCount.pi}`,
+    `Provider calls: ${openCodeLabel} ${comparison.requestCount.openCode}  |  ` +
+      `${piLabel} ${comparison.requestCount.pi}`,
   );
   console.log(
-    `System prompt SHA-256: OpenCode ${comparison.openCodeSystemPromptSha256.slice(0, 12)}  |  ` +
-      `Pi ${comparison.piSystemPromptSha256.slice(0, 12)}`,
+    `System prompt SHA-256: ${openCodeLabel} ${comparison.openCodeSystemPromptSha256.slice(0, 12)}  |  ` +
+      `${piLabel} ${comparison.piSystemPromptSha256.slice(0, 12)}`,
   );
   printSideBySide(comparison.openCodeOutput, comparison.piOutput);
   console.log(`\nExact requests: ${path.relative(repositoryRoot, artifactDirectory)}/`);
@@ -202,11 +198,7 @@ function assertConfiguration() {
   if (major < 22 || (major === 22 && minor < 19)) {
     throw new Error(`Node 22.19 or newer is required. Current version: ${process.versions.node}`);
   }
-  if (!fixture && !apiKey && /^https:\/\/api\.openai\.com(?:\/|$)/.test(apiBaseUrl)) {
-    throw new Error(
-      "Set OPENAI_API_KEY or HARNESS_API_KEY. For another OpenAI-compatible provider, also set HARNESS_API_BASE_URL.",
-    );
-  }
+  if (!apiKey) throw new Error("Set OPENAI_API_KEY before starting the REPL.");
 }
 
 async function handleCommand(input) {
@@ -239,18 +231,11 @@ async function handleCommand(input) {
 
 async function main() {
   assertConfiguration();
-  console.log("\nHarness equivalence REPL");
-  console.log(`Model: ${model}`);
-  console.log(
-    `Provider mode: ${providerMode}${providerMode === "replay" ? " (one model response replayed exactly to both harnesses)" : ""}`,
-  );
-  console.log(`Temperature: ${temperature}`);
+  console.log(`\n${openCodeLabel} vs ${piLabel}`);
+  console.log(`Model: ${MODEL_ID}`);
+  console.log("Pi is unmodified. The extension supplies OpenCode's system prompt and tools.");
+  console.log("When the requests match, Pi receives the same model response as OpenCode.");
   console.log("Each input starts a fresh comparison session. Type :help for inspection commands.\n");
-
-  if (initialPrompt) {
-    await comparePrompt(initialPrompt);
-    return;
-  }
 
   const readline = createInterface({ input: stdin, output: stdout });
   try {

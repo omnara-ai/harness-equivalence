@@ -1,6 +1,18 @@
 import { createServer } from "node:http";
 import { mkdir, writeFile } from "node:fs/promises";
+import { isDeepStrictEqual } from "node:util";
 import path from "node:path";
+import { MODEL_ID } from "./config.mjs";
+
+function stable(value) {
+  if (Array.isArray(value)) return value.map(stable);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => [key, stable(item)]),
+  );
+}
 
 function readBody(request) {
   return new Promise((resolve, reject) => {
@@ -15,35 +27,81 @@ function harnessName(url) {
   return url.match(/\/v1\/(opencode|pi)\//)?.[1];
 }
 
-function completionChunk(model, delta, finishReason = null, usage) {
-  return {
-    id: "chatcmpl-harness-equivalence",
-    object: "chat.completion.chunk",
-    created: 1_787_529_600,
-    model,
-    choices: [{ index: 0, delta, finish_reason: finishReason }],
-    ...(usage ? { usage } : {}),
-  };
+function endpointName(url) {
+  if (url.endsWith("/responses")) return "responses";
+  return undefined;
 }
 
-function sendFixedCompletion(response, body) {
-  const model = typeof body.model === "string" ? body.model : "gpt-4o-mini";
+function sendFixedResponse(response, body) {
+  const model = typeof body.model === "string" ? body.model : MODEL_ID;
+  const events = [
+    {
+      type: "response.created",
+      sequence_number: 1,
+      response: {
+        id: "resp_harness_equivalence",
+        created_at: 1_787_529_600,
+        model,
+        service_tier: null,
+      },
+    },
+    {
+      type: "response.output_item.added",
+      sequence_number: 2,
+      output_index: 0,
+      item: {
+        type: "message",
+        id: "msg_harness_equivalence",
+        status: "in_progress",
+        role: "assistant",
+        content: [],
+      },
+    },
+    {
+      type: "response.output_text.delta",
+      sequence_number: 3,
+      output_index: 0,
+      item_id: "msg_harness_equivalence",
+      delta: "OK",
+      logprobs: null,
+    },
+    {
+      type: "response.output_item.done",
+      sequence_number: 4,
+      output_index: 0,
+      item: {
+        type: "message",
+        id: "msg_harness_equivalence",
+        status: "completed",
+        role: "assistant",
+        content: [{ type: "output_text", text: "OK", annotations: [], logprobs: [] }],
+      },
+    },
+    {
+      type: "response.completed",
+      sequence_number: 5,
+      response: {
+        id: "resp_harness_equivalence",
+        status: "completed",
+        output: [],
+        incomplete_details: null,
+        service_tier: null,
+        usage: {
+          input_tokens: 1,
+          input_tokens_details: { cached_tokens: 0 },
+          output_tokens: 1,
+          output_tokens_details: { reasoning_tokens: 0 },
+          total_tokens: 2,
+        },
+      },
+    },
+  ];
   response.writeHead(200, {
     "content-type": "text/event-stream",
     "cache-control": "no-cache",
     connection: "keep-alive",
   });
-  response.write(`data: ${JSON.stringify(completionChunk(model, { role: "assistant", content: "OK" }))}\n\n`);
-  response.write(`data: ${JSON.stringify(completionChunk(model, {}, "stop"))}\n\n`);
-  response.write(
-    `data: ${JSON.stringify(
-      completionChunk(model, {}, null, {
-        prompt_tokens: 1,
-        completion_tokens: 1,
-        total_tokens: 2,
-      }),
-    )}\n\n`,
-  );
+  for (const event of events) response.write(`data: ${JSON.stringify(event)}\n\n`);
   response.end("data: [DONE]\n\n");
 }
 
@@ -63,7 +121,7 @@ async function requestUpstream(upstream, rawBody) {
     ...(upstream.apiKey ? { authorization: `Bearer ${upstream.apiKey}` } : {}),
     ...(upstream.headers ?? {}),
   };
-  const response = await fetch(`${upstream.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+  const response = await fetch(`${upstream.baseUrl.replace(/\/$/, "")}/responses`, {
     method: "POST",
     headers,
     body: rawBody,
@@ -99,11 +157,12 @@ function sendBufferedResponse(response, upstreamResponse) {
 export async function startCaptureServer(outputDirectory, options = {}) {
   await mkdir(outputDirectory, { recursive: true });
   const mode = options.mode ?? "fixture";
-  if (mode !== "fixture" && !options.upstream?.baseUrl) {
+  if (mode === "replay" && !options.upstream?.baseUrl) {
     throw new Error(`Capture mode ${mode} requires an upstream base URL`);
   }
+  if (!["fixture", "replay"].includes(mode)) throw new Error(`Unknown capture mode: ${mode}`);
   const requestCounts = new Map();
-  const openCodeResponses = new Map();
+  const openCodeExchanges = new Map();
 
   const server = createServer(async (request, response) => {
     try {
@@ -115,7 +174,8 @@ export async function startCaptureServer(outputDirectory, options = {}) {
       }
 
       const harness = harnessName(url);
-      if (request.method !== "POST" || !url.endsWith("/chat/completions") || !harness) {
+      const endpoint = endpointName(url);
+      if (request.method !== "POST" || !endpoint || !harness) {
         response.writeHead(404, { "content-type": "application/json" });
         response.end(JSON.stringify({ error: { message: `Unhandled capture path: ${request.method} ${url}` } }));
         return;
@@ -143,22 +203,23 @@ export async function startCaptureServer(outputDirectory, options = {}) {
       );
 
       if (mode === "fixture") {
-        sendFixedCompletion(response, body);
+        sendFixedResponse(response, body);
         return;
       }
 
       if (mode === "replay" && harness === "pi") {
-        const recorded = openCodeResponses.get(ordinal);
-        if (!recorded) {
-          throw new Error(`Pi request ${ordinal} has no matching OpenCode response to replay`);
+        const recorded = openCodeExchanges.get(ordinal);
+        if (recorded && isDeepStrictEqual(stable(recorded.request), stable(body))) {
+          await recordResponse(outputDirectory, harness, suffix, recorded.response, true);
+          sendBufferedResponse(response, recorded.response);
+          return;
         }
-        await recordResponse(outputDirectory, harness, suffix, recorded, true);
-        sendBufferedResponse(response, recorded);
-        return;
       }
 
       const upstreamResponse = await requestUpstream(options.upstream, rawBody);
-      if (mode === "replay" && harness === "opencode") openCodeResponses.set(ordinal, upstreamResponse);
+      if (mode === "replay" && harness === "opencode") {
+        openCodeExchanges.set(ordinal, { request: body, response: upstreamResponse });
+      }
       await recordResponse(outputDirectory, harness, suffix, upstreamResponse, false);
       sendBufferedResponse(response, upstreamResponse);
     } catch (error) {

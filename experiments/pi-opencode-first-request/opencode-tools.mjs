@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Parser } from "htmlparser2";
 import TurndownService from "turndown";
-import { replaceOpenCodeStyle } from "./opencode-edit.mjs";
+import { applyPatchTool } from "./opencode-apply-patch.mjs";
 
 const DEFAULT_READ_LIMIT = 2000;
 const MODULE_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
@@ -64,23 +64,6 @@ function textResult(text, details = {}) {
 
 function resolvePath(cwd, requested = ".") {
   return path.isAbsolute(requested) ? path.normalize(requested) : path.resolve(cwd, requested);
-}
-
-function splitBom(value) {
-  return value.startsWith("\uFEFF") ? { bom: true, text: value.slice(1) } : { bom: false, text: value };
-}
-
-function joinBom(text, bom) {
-  return `${bom ? "\uFEFF" : ""}${text}`;
-}
-
-async function readText(filename) {
-  return splitBom(await readFile(filename, "utf8"));
-}
-
-async function writeText(filename, text, bom) {
-  await mkdir(path.dirname(filename), { recursive: true });
-  await writeFile(filename, joinBom(text, bom), "utf8");
 }
 
 function isBinary(filename, sample) {
@@ -233,77 +216,6 @@ async function readTool(params, context) {
   }
   output += "\n</content>";
   return textResult(output, { truncated: cut || more });
-}
-
-async function writeTool(params, context) {
-  const filename = resolvePath(context.cwd, params.filePath);
-  let existing = { bom: false, text: "" };
-  try {
-    existing = await readText(filename);
-  } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
-  }
-  const next = splitBom(params.content);
-  await writeText(filename, next.text, existing.bom || next.bom);
-  return textResult("Wrote file successfully.");
-}
-
-const editLocks = new Map();
-
-async function withEditLock(filename, operation) {
-  const previous = editLocks.get(filename) ?? Promise.resolve();
-  let release;
-  const gate = new Promise((resolve) => (release = resolve));
-  const current = previous.then(() => gate);
-  editLocks.set(filename, current);
-  await previous;
-  try {
-    return await operation();
-  } finally {
-    release();
-    if (editLocks.get(filename) === current) editLocks.delete(filename);
-  }
-}
-
-async function editTool(params, context) {
-  if (!params.filePath) throw new Error("filePath is required");
-  if (params.oldString === params.newString) {
-    throw new Error("No changes to apply: oldString and newString are identical.");
-  }
-  const filename = resolvePath(context.cwd, params.filePath);
-  return withEditLock(filename, async () => {
-    if (params.oldString === "") {
-      try {
-        await access(filename);
-        throw new Error(
-          "oldString cannot be empty when editing an existing file. Provide the exact text to replace, or use write for an intentional full-file replacement.",
-        );
-      } catch (error) {
-        if (error?.code !== "ENOENT") throw error;
-      }
-      const next = splitBom(params.newString);
-      await writeText(filename, next.text, next.bom);
-      return textResult("Edit applied successfully.");
-    }
-
-    let info;
-    try {
-      info = await stat(filename);
-    } catch (error) {
-      if (error?.code === "ENOENT") throw new Error(`File ${filename} not found`);
-      throw error;
-    }
-    if (info.isDirectory()) throw new Error(`Path is a directory, not a file: ${filename}`);
-    const source = await readText(filename);
-    const ending = source.text.includes("\r\n") ? "\r\n" : "\n";
-    const normalize = (value) => value.replaceAll("\r\n", "\n");
-    const convert = (value) => (ending === "\r\n" ? value.replaceAll("\n", "\r\n") : value);
-    const oldString = convert(normalize(params.oldString));
-    const newString = convert(normalize(params.newString));
-    const replaced = splitBom(replaceOpenCodeStyle(source.text, oldString, newString, params.replaceAll ?? false));
-    await writeText(filename, replaced.text, source.bom || replaced.bom);
-    return textResult("Edit applied successfully.");
-  });
 }
 
 function runProcess(command, args, options = {}) {
@@ -785,11 +697,11 @@ export function createOpenCodeToolRuntime(options = {}) {
     async execute(name, params, context) {
       let result;
       switch (name) {
+        case "apply_patch":
+          result = await applyPatchTool(params, context);
+          break;
         case "bash":
           result = await bashTool(params, context);
-          break;
-        case "edit":
-          result = await editTool(params, context);
           break;
         case "glob":
           result = await globTool(params, context);
@@ -826,9 +738,6 @@ export function createOpenCodeToolRuntime(options = {}) {
         }
         case "webfetch":
           result = await webfetchTool(params, context);
-          break;
-        case "write":
-          result = await writeTool(params, context);
           break;
         default:
           throw new Error(`Unknown OpenCode tool: ${name}`);

@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "repl": "node experiments/pi-opencode-first-request/repl.mjs",
-    "test": "node test/live-replay.mjs && node test/tool-replay.mjs && node test/tool-sequence-replay.mjs && node test/task-replay.mjs && TASK_TEST_TYPE=explore node test/task-replay.mjs",
+    "test": "node test/replay-guard.mjs && node test/live-replay.mjs && node test/tool-replay.mjs && node test/tool-sequence-replay.mjs && node test/task-replay.mjs && TASK_TEST_TYPE=explore node test/task-replay.mjs",
     "verify": "node experiments/pi-opencode-first-request/run.mjs"
   },
   "engines": {
