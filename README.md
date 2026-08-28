@@ -3,7 +3,7 @@
 Run the same task through vanilla OpenCode and Pi configured with OpenCode's system prompt and tools, then compare their exact model requests and outputs.
 
 ```shell
-OPENAI_API_KEY="your-key" npx -y --loglevel=error github:omnara-ai/harness-equivalence
+OPENAI_API_KEY="your-key" npx -y github:omnara-ai/harness-equivalence
 ```
 
 Requires Node.js 22.10 or newer. If you omit `OPENAI_API_KEY`, the CLI prompts for it instead.
