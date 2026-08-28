@@ -83,6 +83,10 @@ function comparableValue(value) {
     : { present: false, value: null };
 }
 
+function isModelProduced(kind) {
+  return kind === "model output" || kind === "tool call";
+}
+
 export function describeDivergence(openCodeRequest, piRequest, requestOrdinal) {
   const differencePath = firstDifference(openCodeRequest, piRequest);
   if (!differencePath) return undefined;
@@ -143,9 +147,15 @@ export function createDivergenceController(onDivergence) {
   let handled = false;
   let acceptedOverride;
 
-  return async function resolveDivergence(openCodeRequest, piRequest, requestOrdinal) {
+  return async function resolveDivergence(
+    openCodeRequest,
+    piRequest,
+    requestOrdinal,
+    { previousResponseReplayed = false } = {},
+  ) {
     let effectiveBody = piRequest;
     let overrideApplied = false;
+    const automaticOverrides = [];
 
     if (
       acceptedOverride &&
@@ -159,12 +169,26 @@ export function createDivergenceController(onDivergence) {
       overrideApplied = true;
     }
 
-    if (isDeepStrictEqual(openCodeRequest, effectiveBody) || handled || !onDivergence) {
-      return { effectiveBody, overrideApplied };
+    let divergence = describeDivergence(openCodeRequest, effectiveBody, requestOrdinal);
+    while (previousResponseReplayed && divergence && isModelProduced(divergence.kind)) {
+      automaticOverrides.push(divergence);
+      effectiveBody = replaceWithOpenCodeValue(
+        effectiveBody,
+        openCodeRequest,
+        divergence.replacementPath,
+      );
+      overrideApplied = true;
+      divergence = describeDivergence(openCodeRequest, effectiveBody, requestOrdinal);
     }
 
-    const divergence = describeDivergence(openCodeRequest, effectiveBody, requestOrdinal);
-    if (!divergence) return { effectiveBody, overrideApplied };
+    if (!divergence || handled) {
+      return { effectiveBody, overrideApplied, automaticOverrides };
+    }
+
+    if (divergence.kind !== "tool result" || !onDivergence) {
+      handled = true;
+      return { effectiveBody, overrideApplied, automaticOverrides };
+    }
 
     handled = true;
     const useOpenCode = Boolean(await onDivergence(divergence));
@@ -184,6 +208,7 @@ export function createDivergenceController(onDivergence) {
     return {
       effectiveBody,
       overrideApplied,
+      automaticOverrides,
       decision: {
         ...divergence,
         decision: useOpenCode ? "use-opencode" : "keep-pi",

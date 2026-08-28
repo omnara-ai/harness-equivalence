@@ -179,6 +179,7 @@ export async function startCaptureServer(outputDirectory, options = {}) {
   if (!["fixture", "replay"].includes(mode)) throw new Error(`Unknown capture mode: ${mode}`);
   const requestCounts = new Map();
   const openCodeExchanges = new Map();
+  const piResponsesReplayed = new Map();
   const resolveDivergence = createDivergenceController(options.onDivergence);
 
   const server = createServer(async (request, response) => {
@@ -225,11 +226,15 @@ export async function startCaptureServer(outputDirectory, options = {}) {
         const recorded = openCodeExchanges.get(ordinal);
         let effectiveBody = body;
         let overrideApplied = false;
+        let automaticOverrides = [];
 
         if (recorded) {
-          const resolved = await resolveDivergence(recorded.request, body, ordinal);
+          const resolved = await resolveDivergence(recorded.request, body, ordinal, {
+            previousResponseReplayed: piResponsesReplayed.get(ordinal - 1) === true,
+          });
           effectiveBody = resolved.effectiveBody;
           overrideApplied = resolved.overrideApplied;
+          automaticOverrides = resolved.automaticOverrides;
           if (resolved.decision) {
             await writeFile(
               path.join(outputDirectory, "divergence.json"),
@@ -242,11 +247,16 @@ export async function startCaptureServer(outputDirectory, options = {}) {
           capture.overrideApplied = true;
           capture.effectiveBody = effectiveBody;
         }
+        if (automaticOverrides.length > 0) {
+          capture.automaticOverrides = automaticOverrides;
+        }
         await recordCapture(outputDirectory, harness, suffix, capture);
 
         if (recorded && isDeepStrictEqual(stable(recorded.request), stable(effectiveBody))) {
+          piResponsesReplayed.set(ordinal, true);
           await recordResponse(outputDirectory, harness, suffix, recorded.response, true, {
             overrideApplied,
+            automaticOverrides: automaticOverrides.length,
           });
           sendBufferedResponse(response, recorded.response);
           return;
@@ -254,8 +264,10 @@ export async function startCaptureServer(outputDirectory, options = {}) {
 
         const effectiveRawBody = overrideApplied ? JSON.stringify(effectiveBody) : rawBody;
         const upstreamResponse = await requestUpstream(options.upstream, effectiveRawBody);
+        piResponsesReplayed.set(ordinal, false);
         await recordResponse(outputDirectory, harness, suffix, upstreamResponse, false, {
           overrideApplied,
+          automaticOverrides: automaticOverrides.length,
         });
         sendBufferedResponse(response, upstreamResponse);
         return;

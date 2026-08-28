@@ -142,6 +142,48 @@ try {
     await rm(keepDirectory, { recursive: true, force: true });
   }
 
+  const reasoningDirectory = await mkdtemp(path.join(os.tmpdir(), "harness-reasoning-replay-"));
+  const reasoningDecisions = [];
+  const reasoningCapture = await startCaptureServer(reasoningDirectory, {
+    mode: "replay",
+    upstream: { baseUrl: `http://127.0.0.1:${address.port}/v1` },
+    onDivergence(divergenceValue) {
+      reasoningDecisions.push(divergenceValue);
+      return true;
+    },
+  });
+  const openCodeReasoning = {
+    type: "reasoning",
+    encrypted_content: "encrypted-reasoning",
+    summary: [{ type: "summary_text", text: "Same reasoning." }],
+  };
+  const piReasoning = { ...openCodeReasoning, content: [] };
+  try {
+    const callsBeforeReasoningTest = upstreamCalls;
+    const openCodeFirst = await send(reasoningCapture, "opencode", requestBody([user]));
+    const openCodeSecond = await send(
+      reasoningCapture,
+      "opencode",
+      requestBody([user, openCodeReasoning]),
+    );
+    assert.equal(await send(reasoningCapture, "pi", requestBody([user])), openCodeFirst);
+    assert.equal(
+      await send(reasoningCapture, "pi", requestBody([user, piReasoning])),
+      openCodeSecond,
+    );
+    assert.equal(reasoningDecisions.length, 0);
+    assert.equal(upstreamCalls, callsBeforeReasoningTest + 2);
+
+    const reasoningResponse = JSON.parse(
+      await readFile(path.join(reasoningDirectory, "pi.2.response.json"), "utf8"),
+    );
+    assert.equal(reasoningResponse.replayed, true);
+    assert.equal(reasoningResponse.automaticOverrides, 1);
+  } finally {
+    await reasoningCapture.close();
+    await rm(reasoningDirectory, { recursive: true, force: true });
+  }
+
   console.log("Interactive first-divergence choices passed");
 } finally {
   await capture.close();

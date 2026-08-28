@@ -14,7 +14,7 @@ OpenCode runs first in a generated fixture. Pi runs second in a restored copy of
 
 A local relay captures every provider request. When Pi sends the same parsed request as OpenCode, the relay returns the exact response bytes OpenCode received instead of calling the model again. This keeps model randomness from creating a difference when both harnesses sent the same thing.
 
-At the first difference, the CLI shows the model-visible values side by side with an isolated diff. Keeping Pi's value makes a separate model call. Choosing OpenCode's value substitutes the differing item, then reuses OpenCode's response if the resulting request matches. The CLI only asks once per run because the histories have diverged after that point.
+Because matching requests receive the same model-response bytes, text, reasoning, and tool calls from replayed responses are normalized automatically. If the independently executed tool result differs, the CLI shows both results and asks which one to keep. It only asks once because the histories have diverged after that point.
 
 The initial request and tested ordinary tool loops match after parsing. Complete requests, responses, outputs, and reports are written under `experiments/pi-opencode-first-request/artifacts/`.
 
